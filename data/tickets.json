@@ -1,0 +1,67 @@
+{
+  "tickets": [
+    {
+      "ticket_id": "TKT-0001",
+      "status": "ACTIVE",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-0002",
+      "status": "ACTIVE",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-0003",
+      "status": "ACTIVE",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-0004",
+      "status": "ACTIVE",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-0005",
+      "status": "ACTIVE",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-EXPIRED-01",
+      "status": "ACTIVE",
+      "valid_from": "2026-08-29T09:12:58+00:00",
+      "valid_until": "2026-09-26T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-FUTURE-01",
+      "status": "ACTIVE",
+      "valid_from": "2026-10-28T09:12:58+00:00",
+      "valid_until": "2026-11-27T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-USED-01",
+      "status": "USED",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    },
+    {
+      "ticket_id": "TKT-CANCEL-01",
+      "status": "CANCELLED",
+      "valid_from": "2026-09-27T09:12:58+00:00",
+      "valid_until": "2027-09-28T09:12:58+00:00",
+      "ticket_type": "SINGLE"
+    }
+  ]
+}

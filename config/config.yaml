@@ -1,0 +1,23 @@
+# AI Ticketless Passenger Detection - configuration
+# Other modules may add their own top-level sections below.
+
+camera:
+  # Primary video source.
+  #   Android IP camera (e.g. "IP Webcam" app): "http://<phone-ip>:8080/video"
+  #   Local webcam: 0 (or 1, 2 ... for other devices)
+  #   Video file:  "path/to/video.mp4"
+  source: "http://192.0.0.4:8080/video"
+
+  # If the primary source fails, try the local webcam below.
+  fallback_to_webcam: true
+  webcam_index: 0
+
+  # Connection handling (seconds)
+  open_timeout_sec: 10
+  read_timeout_sec: 5
+  reconnect_attempts: 3
+  reconnect_delay_sec: 2
+
+  # Optional capture resolution (null = source default)
+  frame_width: null
+  frame_height: null
