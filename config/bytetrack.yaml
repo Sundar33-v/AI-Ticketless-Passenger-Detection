@@ -1,0 +1,31 @@
+# ByteTrack parameters used by app/tracker.py (Ultralytics bundled ByteTrack).
+# Values are the Ultralytics defaults except new_track_thresh and track_buffer.
+#
+# At startup app.tracker.prepare_tracker_yaml() validates this file and writes an
+# effective copy to data/runtime/bytetrack_effective.yaml, which is what YOLO.track uses.
+
+# Tracker backend. Only "bytetrack" is supported by this project.
+tracker_type: bytetrack
+
+# First association stage: detections scoring at least this are matched first.
+track_high_thresh: 0.25
+
+# Second association stage: low-score boxes (between this and track_high_thresh) can
+# only continue an existing track. This recovers people during brief occlusion.
+# tracking.input_confidence (conf= passed to YOLO) must be <= this value.
+track_low_thresh: 0.1
+
+# Minimum score to start a NEW track (a new person). OVERRIDDEN AT RUNTIME by
+# detection.confidence in config/config.yaml (or --conf), so that one setting controls
+# person acceptance; a WARNING is logged when the two values differ.
+new_track_thresh: 0.35
+
+# Frames a lost track is kept before it is dropped (60 frames ~ 2 s at 30 FPS).
+# Higher tolerates longer occlusion but raises the risk of ID switches.
+track_buffer: 60
+
+# IoU/cost threshold for matching detections to existing tracks.
+match_thresh: 0.8
+
+# Fuse detection confidence with IoU when matching; stabilises weak detections.
+fuse_score: True

@@ -1,277 +1,293 @@
-"""Tests for the SQLite passenger event database.
+"""Tests for app/database.py (stdlib sqlite3 schema, connections, transactions, timestamps)."""
 
-Run: python -m unittest discover -s tests -v   (pytest also works)
-"""
+from __future__ import annotations
 
 import sqlite3
-import sys
-import tempfile
-import threading
-import unittest
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+import pytest
 
-from sqlalchemy import inspect  # noqa: E402
-from sqlalchemy.exc import IntegrityError  # noqa: E402
-
-from app.database import (  # noqa: E402
+from app.database import (
+    SCHEMA,
     Database,
-    EventNotFoundError,
-    PassengerEvent,
-    PassengerRepository,
-    PassengerStatus,
-    TicketStatus,
-    init_db,
+    DatabaseError,
+    parse_iso,
+    to_iso,
+    transaction,
+    utc_now,
 )
-from app.ticket.generate_test_tickets import build_demo_tickets  # noqa: E402
-from app.ticket.ticket_validator import TicketValidator  # noqa: E402
 
-NOW = datetime(2026, 9, 28, 12, 0, tzinfo=timezone.utc)
-T0 = datetime(2026, 9, 28, 12, 0)  # naive UTC
-
-
-class RepoTestCase(unittest.TestCase):
-    def setUp(self):
-        self.db = init_db(":memory:")
-        self.repo = PassengerRepository(self.db)
-        self.validator = TicketValidator.from_dicts(build_demo_tickets(now=NOW, valid_count=3))
-
-    def tearDown(self):
-        self.db.dispose()
-
-    def assign(self, event_id, ticket):
-        return self.repo.validate_and_assign_ticket(event_id, ticket, self.validator, now=NOW)
+TABLES = {"system_settings", "passengers", "tickets", "detection_sessions", "detection_records",
+          "boarding_events", "validation_events"}
+INDEXES = {
+    "idx_tickets_passenger", "idx_tickets_status", "idx_tickets_travel_date", "idx_sessions_started",
+    "idx_detections_time", "idx_detections_track", "idx_boarding_time", "idx_boarding_status",
+    "idx_validation_time", "idx_validation_outcome", "idx_validation_ticket", "idx_validation_boarding",
+}
+T0 = "2026-01-15T05:00:00.000000Z"
+T1 = "2026-01-15T23:00:00.000000Z"
 
 
-class SchemaTests(RepoTestCase):
-    def test_schema_columns(self):
-        cols = {c["name"]: c for c in inspect(self.db.engine).get_columns("passenger_events")}
-        for name in ("event_id", "track_id", "entry_time", "exit_time",
-                     "ticket_id", "ticket_status", "passenger_status"):
-            self.assertIn(name, cols)
-        self.assertFalse(cols["track_id"]["nullable"])
-        self.assertTrue(cols["exit_time"]["nullable"])
-        self.assertTrue(cols["ticket_id"]["nullable"])
-
-    def test_status_enums(self):
-        self.assertEqual({s.value for s in TicketStatus}, {"VALID", "INVALID", "USED", "NOT_FOUND"})
-        self.assertEqual({s.value for s in PassengerStatus}, {"PENDING", "VERIFIED", "NEEDS_CHECK"})
-
-    def test_db_rejects_unknown_status_and_bad_exit(self):
-        raw = self.db.engine.raw_connection()
-        try:
-            cur = raw.cursor()
-            with self.assertRaises(sqlite3.IntegrityError):
-                cur.execute(
-                    "INSERT INTO passenger_events (track_id, entry_time, passenger_status, created_at, updated_at)"
-                    " VALUES (1, '2026-01-01', 'TICKETLESS', '2026-01-01', '2026-01-01')"
-                )
-            with self.assertRaises(sqlite3.IntegrityError):
-                cur.execute(
-                    "INSERT INTO passenger_events (track_id, entry_time, exit_time, passenger_status, created_at, updated_at)"
-                    " VALUES (1, '2026-01-02', '2026-01-01', 'PENDING', '2026-01-01', '2026-01-01')"
-                )
-        finally:
-            raw.rollback()
-            raw.close()
-
-    def test_db_enforces_single_valid_use_per_ticket(self):
-        with self.assertRaises(IntegrityError):
-            with self.db.session() as s:
-                for track in (1, 2):
-                    s.add(PassengerEvent(track_id=track, entry_time=T0, ticket_id="TKT-0001",
-                                         ticket_status=TicketStatus.VALID,
-                                         passenger_status=PassengerStatus.VERIFIED))
-        # Non-VALID duplicates are allowed (e.g. two failed scans of the same ID).
-        with self.db.session() as s:
-            for track in (1, 2):
-                s.add(PassengerEvent(track_id=track, entry_time=T0, ticket_id="TKT-0001",
-                                     ticket_status=TicketStatus.USED,
-                                     passenger_status=PassengerStatus.NEEDS_CHECK))
+def _names(conn, kind):
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = ?", (kind,)).fetchall()
+    return {r["name"] for r in rows}
 
 
-class EntryExitTests(RepoTestCase):
-    def test_new_entry_is_pending_without_ticket(self):
-        ev = self.repo.create_entry(track_id=7, entry_time=T0)
-        self.assertIsNotNone(ev.event_id)
-        self.assertEqual(ev.track_id, 7)
-        self.assertEqual(ev.passenger_status, PassengerStatus.PENDING)
-        self.assertIsNone(ev.ticket_id)
-        self.assertIsNone(ev.ticket_status)
-        self.assertIsNone(ev.exit_time)
-
-    def test_default_entry_time_and_tz_aware_input(self):
-        ev = self.repo.create_entry(1)
-        self.assertIsNotNone(ev.entry_time)
-        ist = timezone(timedelta(hours=5, minutes=30))
-        ev2 = self.repo.create_entry(2, entry_time=datetime(2026, 9, 28, 17, 30, tzinfo=ist))
-        self.assertEqual(self.repo.get_event(ev2.event_id).entry_time, T0)
-
-    def test_invalid_track_id(self):
-        for bad in (-1, "3", None, True):
-            with self.assertRaises(ValueError):
-                self.repo.create_entry(bad)
-
-    def test_exit_without_ticket_needs_check_not_ticketless(self):
-        ev = self.repo.create_entry(1, entry_time=T0)
-        ev = self.repo.record_exit(ev.event_id, exit_time=T0 + timedelta(minutes=10))
-        self.assertEqual(ev.exit_time, T0 + timedelta(minutes=10))
-        self.assertEqual(ev.passenger_status, PassengerStatus.NEEDS_CHECK)
-        self.assertIsNone(ev.ticket_status)
-
-    def test_exit_after_verification_stays_verified(self):
-        ev = self.repo.create_entry(1, entry_time=T0)
-        self.assign(ev.event_id, "TKT-0001")
-        ev = self.repo.record_exit(ev.event_id, exit_time=T0 + timedelta(minutes=1))
-        self.assertEqual(ev.passenger_status, PassengerStatus.VERIFIED)
-
-    def test_exit_is_idempotent_and_validated(self):
-        ev = self.repo.create_entry(1, entry_time=T0)
-        with self.assertRaises(ValueError):
-            self.repo.record_exit(ev.event_id, exit_time=T0 - timedelta(seconds=1))
-        first = self.repo.record_exit(ev.event_id, exit_time=T0 + timedelta(minutes=1))
-        second = self.repo.record_exit(ev.event_id, exit_time=T0 + timedelta(minutes=5))
-        self.assertEqual(first.exit_time, second.exit_time)
-
-    def test_missing_event(self):
-        with self.assertRaises(EventNotFoundError):
-            self.repo.record_exit(999)
-        with self.assertRaises(EventNotFoundError):
-            self.assign(999, "TKT-0001")
-        self.assertIsNone(self.repo.get_event(999))
-
-    def test_open_event_for_track(self):
-        a = self.repo.create_entry(5, entry_time=T0)
-        self.repo.record_exit(a.event_id, exit_time=T0 + timedelta(minutes=1))
-        self.assertIsNone(self.repo.get_open_event_for_track(5))
-        b = self.repo.create_entry(5, entry_time=T0 + timedelta(minutes=2))
-        self.assertEqual(self.repo.get_open_event_for_track(5).event_id, b.event_id)
-        self.assertIsNone(self.repo.get_open_event_for_track(6))
+def _session(conn, sid="s1"):
+    conn.execute(
+        "INSERT INTO detection_sessions (session_id, source_type, source_label, status, started_at, "
+        "last_heartbeat_at) VALUES (?, 'video', 'clip.mp4', 'RUNNING', ?, ?)", (sid, T0, T0))
 
 
-class TicketAssignmentTests(RepoTestCase):
-    def test_valid_ticket_verifies(self):
-        ev = self.repo.create_entry(1, entry_time=T0)
-        ev, res = self.assign(ev.event_id, " tkt-0001 ")
-        self.assertEqual(res.status, TicketStatus.VALID)
-        self.assertEqual((ev.ticket_id, ev.ticket_status, ev.passenger_status),
-                         ("TKT-0001", TicketStatus.VALID, PassengerStatus.VERIFIED))
-
-    def test_failed_scans_need_check(self):
-        expected = {
-            "TKT-9999": TicketStatus.NOT_FOUND,
-            "TKT-EXPIRED-01": TicketStatus.INVALID,
-            "TKT-CANCEL-01": TicketStatus.INVALID,
-            "TKT-USED-01": TicketStatus.USED,
-            "garbage!!": TicketStatus.INVALID,
-        }
-        for i, (tid, status) in enumerate(expected.items()):
-            ev = self.repo.create_entry(i, entry_time=T0)
-            ev, res = self.assign(ev.event_id, tid)
-            self.assertEqual(res.status, status, tid)
-            self.assertEqual(ev.ticket_status, status, tid)
-            self.assertEqual(ev.passenger_status, PassengerStatus.NEEDS_CHECK, tid)
-            self.assertIsNotNone(ev.ticket_id)
-
-    def test_ticket_reuse_by_another_passenger_is_used(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        b = self.repo.create_entry(2, entry_time=T0)
-        self.assign(a.event_id, "TKT-0001")
-        ev_b, res = self.assign(b.event_id, "TKT-0001")
-        self.assertEqual(res.status, TicketStatus.USED)
-        self.assertEqual(ev_b.passenger_status, PassengerStatus.NEEDS_CHECK)
-        self.assertTrue(self.repo.is_ticket_in_use("TKT-0001"))
-        self.assertFalse(self.repo.is_ticket_in_use("TKT-0001", exclude_event_id=a.event_id))
-
-    def test_rescan_by_same_passenger_stays_valid(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        self.assign(a.event_id, "TKT-0001")
-        ev, res = self.assign(a.event_id, "TKT-0001")
-        self.assertEqual(res.status, TicketStatus.VALID)
-        self.assertEqual(ev.passenger_status, PassengerStatus.VERIFIED)
-
-    def test_verified_not_downgraded_by_bad_rescan(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        self.assign(a.event_id, "TKT-0001")
-        ev, res = self.assign(a.event_id, "TKT-9999")
-        self.assertEqual(res.status, TicketStatus.NOT_FOUND)
-        self.assertEqual((ev.ticket_id, ev.ticket_status, ev.passenger_status),
-                         ("TKT-0001", TicketStatus.VALID, PassengerStatus.VERIFIED))
-
-    def test_needs_check_can_recover_with_valid_ticket(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        self.assign(a.event_id, "TKT-9999")
-        ev, _ = self.assign(a.event_id, "TKT-0002")
-        self.assertEqual(ev.passenger_status, PassengerStatus.VERIFIED)
-
-    def test_manual_status_override(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        self.assertEqual(self.repo.mark_needs_check(a.event_id).passenger_status, PassengerStatus.NEEDS_CHECK)
-        ev = self.repo.set_passenger_status(a.event_id, "VERIFIED")
-        self.assertEqual(ev.passenger_status, PassengerStatus.VERIFIED)
-        with self.assertRaises(ValueError):
-            self.repo.set_passenger_status(a.event_id, "TICKETLESS")
+def _passenger(conn, ref="PSG-0001"):
+    conn.execute("INSERT INTO passengers (passenger_ref, created_at) VALUES (?, ?)", (ref, T0))
 
 
-class QueryTests(RepoTestCase):
-    def test_list_and_counts(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        b = self.repo.create_entry(2, entry_time=T0 + timedelta(seconds=1))
-        self.repo.create_entry(3, entry_time=T0 + timedelta(seconds=2))
-        self.assign(a.event_id, "TKT-0001")
-        self.assign(b.event_id, "TKT-9999")
-
-        self.assertEqual(self.repo.status_counts(), {"PENDING": 1, "VERIFIED": 1, "NEEDS_CHECK": 1})
-        self.assertEqual([e.track_id for e in self.repo.list_events()], [3, 2, 1])
-        self.assertEqual([e.track_id for e in self.repo.list_events(PassengerStatus.VERIFIED)], [1])
-        self.assertEqual([e.track_id for e in self.repo.list_events(ticket_status="NOT_FOUND")], [2])
-        self.assertEqual(len(self.repo.list_events(limit=1)), 1)
-        self.assertEqual([e.track_id for e in self.repo.list_events(limit=1, offset=1)], [2])
-
-    def test_to_dict(self):
-        a = self.repo.create_entry(1, entry_time=T0)
-        ev, _ = self.assign(a.event_id, "TKT-0001")
-        d = ev.to_dict()
-        self.assertEqual(d["ticket_status"], "VALID")
-        self.assertEqual(d["passenger_status"], "VERIFIED")
-        self.assertEqual(d["entry_time"], T0.isoformat())
-        self.assertIsNone(d["exit_time"])
+def _ticket(conn, ticket_id="TKT-1", **over):
+    values = dict(ticket_id=ticket_id, passenger_ref="PSG-0001", route_id="R1", boarding_station="A",
+                  destination_station="B", travel_date="2026-01-15", valid_from=T0, expires_at=T1,
+                  status="ACTIVE", created_at=T0, updated_at=T0)
+    values.update(over)
+    cols = ", ".join(values)
+    marks = ", ".join("?" for _ in values)
+    conn.execute(f"INSERT INTO tickets ({cols}) VALUES ({marks})", tuple(values.values()))
 
 
-class FileDatabaseTests(unittest.TestCase):
-    def test_persists_across_instances_and_threads(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "sub" / "passengers.db"
-            db = init_db(path)
-            repo = PassengerRepository(db)
-            errors = []
-
-            def worker(offset):
-                try:
-                    for i in range(10):
-                        repo.create_entry(offset + i, entry_time=T0)
-                except Exception as exc:  # pragma: no cover - surfaced below
-                    errors.append(exc)
-
-            threads = [threading.Thread(target=worker, args=(n * 100,)) for n in range(4)]
-            for t in threads:
-                t.start()
-            for t in threads:
-                t.join()
-            db.dispose()
-            self.assertEqual(errors, [])
-            self.assertTrue(path.exists())
-
-            db2 = Database(path)
-            try:
-                self.assertEqual(PassengerRepository(db2).status_counts()["PENDING"], 40)
-            finally:
-                db2.dispose()
+@pytest.fixture
+def database(tmp_path):
+    db = Database(tmp_path / "t.db")
+    db.initialize()
+    return db
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.fixture
+def conn(database):
+    c = database.connect()
+    try:
+        yield c
+    finally:
+        c.close()
+
+
+# ------------------------------------------------------------------ schema
+def test_initialize_is_idempotent_and_creates_everything(database):
+    database.initialize()  # second run must not fail or duplicate settings
+    c = database.connect()
+    try:
+        assert TABLES <= _names(c, "table")
+        assert INDEXES <= _names(c, "index")
+        settings = dict(c.execute("SELECT key, value FROM system_settings").fetchall())
+        assert settings["schema_version"] == "1"
+        assert "created_at" in settings
+        assert c.execute("SELECT COUNT(*) FROM system_settings").fetchone()[0] == 2
+    finally:
+        c.close()
+
+
+def test_created_at_is_written_once(database):
+    c = database.connect()
+    try:
+        first = c.execute("SELECT value FROM system_settings WHERE key='created_at'").fetchone()[0]
+        database.initialize()
+        again = c.execute("SELECT value FROM system_settings WHERE key='created_at'").fetchone()[0]
+    finally:
+        c.close()
+    assert first == again
+
+
+def test_every_index_in_schema_is_known():
+    for name in INDEXES:
+        assert name in SCHEMA
+
+
+def test_connect_pragmas(conn):
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    assert conn.isolation_level is None
+    assert isinstance(conn.execute("SELECT 1 AS one").fetchone(), sqlite3.Row)
+
+
+def test_newer_schema_version_is_fatal(database, conn):
+    conn.execute("UPDATE system_settings SET value = '2' WHERE key = 'schema_version'")
+    with pytest.raises(DatabaseError, match="newer version"):
+        database.initialize()
+
+
+def test_parent_directory_is_created(tmp_path):
+    db = Database(tmp_path / "nested" / "dir" / "x.db")
+    db.initialize()
+    assert (tmp_path / "nested" / "dir" / "x.db").is_file()
+
+
+def test_path_with_space_and_hash_works(tmp_path):
+    db = Database(tmp_path / "my data #1" / "t.db")
+    db.initialize()
+    w = db.connect()
+    try:
+        _session(w)
+    finally:
+        w.close()
+    r = db.read_connection()
+    try:
+        assert r.execute("SELECT COUNT(*) FROM detection_sessions").fetchone()[0] == 1
+    finally:
+        r.close()
+
+
+# --------------------------------------------------------------- timestamps
+def test_to_iso_fixed_width_utc():
+    value = datetime(2026, 1, 15, 7, 0, tzinfo=timezone.utc)
+    assert to_iso(value) == "2026-01-15T07:00:00.000000Z"
+    ist = timezone(timedelta(hours=5, minutes=30))
+    assert to_iso(datetime(2026, 1, 15, 12, 30, 0, 123, tzinfo=ist)) == "2026-01-15T07:00:00.000123Z"
+    assert len(to_iso(utc_now())) == 27
+
+
+def test_to_iso_rejects_naive():
+    with pytest.raises(ValueError):
+        to_iso(datetime(2026, 1, 15, 7, 0))
+
+
+def test_parse_iso_round_trip():
+    value = datetime(2026, 1, 15, 7, 0, 1, 500, tzinfo=timezone.utc)
+    assert parse_iso(to_iso(value)) == value
+    assert parse_iso(to_iso(value)).tzinfo is not None
+
+
+def test_iso_strings_sort_chronologically():
+    base = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    values = [base + timedelta(microseconds=n) for n in (1, 999999, 10, 1000000)]
+    assert sorted(to_iso(v) for v in values) == [to_iso(v) for v in sorted(values)]
+
+
+# ------------------------------------------------------------- transactions
+def test_transaction_commits(database, conn):
+    with transaction(conn):
+        _session(conn)
+    other = database.connect()
+    try:
+        assert other.execute("SELECT COUNT(*) FROM detection_sessions").fetchone()[0] == 1
+    finally:
+        other.close()
+
+
+def test_transaction_rolls_back_on_exception(conn):
+    with pytest.raises(ZeroDivisionError):
+        with transaction(conn):
+            _session(conn)
+            1 / 0
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM detection_sessions").fetchone()[0] == 0
+
+
+def test_transaction_refuses_nesting(conn):
+    with transaction(conn):
+        with pytest.raises(RuntimeError, match="already open"):
+            with transaction(conn):
+                pass
+    assert not conn.in_transaction
+
+
+def test_deferred_transaction(conn):
+    with transaction(conn, immediate=False):
+        _session(conn)
+    assert conn.execute("SELECT COUNT(*) FROM detection_sessions").fetchone()[0] == 1
+
+
+# --------------------------------------------------------------- read-only
+def test_read_connection_rejects_writes(database):
+    r = database.read_connection()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            _session(r)
+        assert r.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        r.close()
+
+
+def test_read_connection_does_not_set_journal_mode(database, monkeypatch):
+    executed = []
+    real_connect = sqlite3.connect
+
+    class Spy:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args):
+            executed.append(sql)
+            return self._conn.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def __setattr__(self, name, value):
+            if name == "_conn":
+                object.__setattr__(self, name, value)
+            else:
+                setattr(self._conn, name, value)
+
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: Spy(real_connect(*a, **k)))
+    r = database.read_connection()
+    r.close()
+    assert executed and not any("journal_mode" in sql.lower() for sql in executed)
+
+
+def test_memory_database_read_connection_is_normal():
+    db = Database(":memory:")
+    c = db.read_connection()
+    try:
+        c.execute("CREATE TABLE x (a INTEGER)")
+    finally:
+        c.close()
+
+
+# -------------------------------------------------------------- constraints
+def test_unique_session_track_boarding(conn):
+    _session(conn)
+    sql = ("INSERT INTO boarding_events (session_id, track_id, boarded_at, direction) "
+           "VALUES ('s1', 7, ?, 'top_to_bottom')")
+    conn.execute(sql, (T0,))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (T1,))
+    row = conn.execute("SELECT verification_status FROM boarding_events").fetchone()
+    assert row[0] == "VERIFICATION_REQUIRED"
+
+
+def test_ticket_status_check(conn):
+    _passenger(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        _ticket(conn, status="BOGUS")
+
+
+def test_ticket_window_check(conn):
+    _passenger(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        _ticket(conn, valid_from=T1, expires_at=T0)
+    with pytest.raises(sqlite3.IntegrityError):
+        _ticket(conn, ticket_id="TKT-2", destination_station="A")
+
+
+def test_ticket_requires_existing_passenger(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        _ticket(conn)
+
+
+def test_boarding_status_check(conn):
+    _session(conn)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO boarding_events (session_id, track_id, boarded_at, direction, "
+                     "verification_status) VALUES ('s1', 1, ?, 'd', 'TICKETLESS')", (T0,))
+
+
+def test_detection_confidence_and_synthetic_checks(conn):
+    _session(conn)
+    sql = ("INSERT INTO detection_records (session_id, track_id, frame_index, detected_at, confidence, "
+           "x1, y1, x2, y2, is_synthetic) VALUES ('s1', 1, ?, ?, ?, 0, 0, 1, 1, ?)")
+    conn.execute(sql, (0, T0, 0.5, 0))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (1, T0, 1.5, 0))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (2, T0, 0.5, 2))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (0, T0, 0.5, 0))  # UNIQUE(session, track, frame)

@@ -1,0 +1,47 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# SQLite databases (never commit passenger, ticket or detection data)
+*.db
+*.db-wal
+*.db-shm
+
+# Secrets and local settings
+.env
+
+# Logs
+logs/
+*.log
+
+# Runtime output (preview frame, effective tracker YAML) and generated QR images
+data/runtime/
+data/qr_codes/
+
+# YOLO weights (download, see models/README.md)
+models/*.pt
+
+# Video media
+data/videos/*
+!data/videos/README.txt
+data/*.mp4
+data/*.avi
+data/*.mov
+data/*.mkv
+
+# Ultralytics output
+runs/
+
+# Workflow artifacts
+.agents/
+
+# IDE
+.vscode/
+.idea/
