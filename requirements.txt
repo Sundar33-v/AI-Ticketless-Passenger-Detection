@@ -1,0 +1,31 @@
+# AI Ticketless Passenger Detection - pinned dependencies (Python 3.11).
+# Every pin matches the versions tested together in the project venv.
+# CPU-only PyTorch on a fresh machine: see docs/installation.md
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Detection and tracking (Ultralytics bundles ByteTrack; lap is its assignment solver)
+ultralytics==8.4.165
+torch==2.14.0
+torchvision==0.29.0
+lap==0.5.13
+
+# Video and image processing
+opencv-python==5.0.0.93
+numpy==2.4.6
+
+# Dashboard and analytics
+streamlit==1.64.0
+pandas==3.0.6
+
+# Configuration
+PyYAML==6.0.3
+
+# QR ticket generation (scanning uses OpenCV's QRCodeDetector)
+qrcode==8.2
+pillow==12.3.0
+
+# IANA time zones for zoneinfo on Windows
+tzdata==2026.4
+
+# Tests
+pytest==8.3.3

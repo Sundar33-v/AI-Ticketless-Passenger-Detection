@@ -1,12 +1,13 @@
 @echo off
-REM Launch the Streamlit conductor dashboard (reads data\passengers.db).
-REM Run this in a second terminal while scripts\run_detection.bat is running.
-REM Extra arguments go to the dashboard, e.g.: scripts\run_dashboard.bat --db data\passengers.db
+REM Start the Streamlit conductor dashboard at http://127.0.0.1:8501 (localhost only: it has no login).
+REM It reads the same SQLite database as scripts\run_detection.bat (TPD_DB_PATH or database.path in
+REM config\config.yaml). Run it in a second terminal while detection is running.
 setlocal
 cd /d "%~dp0.."
-set "PY=python"
-if exist ".venv\Scripts\python.exe" set "PY=.venv\Scripts\python.exe"
-
-REM Bound to localhost only: the dashboard has no login.
-"%PY%" -m streamlit run app\dashboard\dashboard.py --server.address 127.0.0.1 --server.port 8501 -- %*
-endlocal
+set "PY=%~dp0..\.venv\Scripts\python.exe"
+if not exist "%PY%" (
+    echo Run scripts\setup_windows.bat first
+    exit /b 1
+)
+"%PY%" -m streamlit run dashboard\app.py --server.address 127.0.0.1 --server.port 8501 %*
+endlocal & exit /b %ERRORLEVEL%

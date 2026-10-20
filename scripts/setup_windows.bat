@@ -1,41 +1,73 @@
 @echo off
-REM One-time setup for AI Ticketless Passenger Detection on Windows.
-REM Creates .venv, installs dependencies, and generates demo tickets if missing.
+REM One-time setup on Windows: Python 3.11 virtual environment (.venv), pinned dependencies,
+REM the SQLite database (tables only) and a check for the YOLO model file.
+REM CPU-only machines are supported; no GPU is required.
 setlocal
 cd /d "%~dp0.."
+set "PY=%~dp0..\.venv\Scripts\python.exe"
 
-where python >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python not found on PATH. Install Python 3.10+ from https://www.python.org/ and tick "Add to PATH".
-    exit /b 1
-)
+if exist "%PY%" goto check_venv
+set "BASE="
+py -3.11 -c "import sys" >nul 2>&1 && set "BASE=py -3.11"
+if defined BASE goto create_venv
+python -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 1)" >nul 2>&1 && set "BASE=python"
+if defined BASE goto create_venv
+echo Python 3.11 is required. Install it from https://www.python.org/downloads/ and run this script again.
+exit /b 1
 
-if not exist ".venv\Scripts\python.exe" (
-    echo Creating virtual environment .venv ...
-    python -m venv .venv || (echo [ERROR] Could not create .venv & exit /b 1)
-)
-set "PY=.venv\Scripts\python.exe"
+:create_venv
+echo Creating virtual environment .venv with %BASE% ...
+%BASE% -m venv .venv
+if errorlevel 1 goto venv_failed
+goto install
 
-"%PY%" -m pip install --upgrade pip || exit /b 1
+:check_venv
+"%PY%" -c "import sys; sys.exit(0 if sys.version_info[:2] == (3, 11) else 1)"
+if errorlevel 1 goto wrong_venv
 
-if exist "requirements.txt" (
-    echo Installing from requirements.txt ...
-    "%PY%" -m pip install -r requirements.txt || (echo [ERROR] Dependency install failed. & exit /b 1)
-) else (
-    echo [WARN] requirements.txt not found - installing pinned core packages.
-    "%PY%" -m pip install ultralytics==8.4.158 opencv-python==4.13.0.92 lap==0.5.13 numpy==2.4.6 ^
-        SQLAlchemy==2.1.1 streamlit==1.64.0 pandas==3.0.3 PyYAML==6.0.3 ^
-        qrcode==8.2 pillow==12.2.0 pyzbar==0.1.9 pytest==8.3.3 || (echo [ERROR] Dependency install failed. & exit /b 1)
-)
+:install
+if not exist "requirements.txt" goto no_requirements
+echo Installing pinned dependencies from requirements.txt ...
+"%PY%" -m pip install -r requirements.txt
+if errorlevel 1 goto install_failed
+"%PY%" -m pip check
+if errorlevel 1 goto install_failed
 
-if not exist "data\tickets.json" (
-    echo Generating demo tickets and QR codes in data\ ...
-    "%PY%" -m app.ticket.generate_test_tickets
-)
+echo Initializing the database ...
+"%PY%" scripts\init_db.py
+if errorlevel 1 goto db_failed
 
+if exist "models\yolov8n.pt" goto done
+echo.
+echo [WARN] YOLO model not found: models\yolov8n.pt  (see models\README.md)
+echo Download it once with:
+echo   cd models
+echo   ..\.venv\Scripts\python.exe -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+
+:done
 echo.
 echo Setup complete.
-echo   1. Start the IP Webcam app on the Android phone (same Wi-Fi/hotspot as this laptop).
-echo   2. scripts\run_detection.bat   (camera + detection, default http://192.0.0.4:8080/video)
-echo   3. scripts\run_dashboard.bat   (conductor dashboard in the browser)
+echo   1. Start the IP Webcam app on the Android phone (same Wi-Fi network / hotspot as this computer).
+echo   2. scripts\run_detection.bat            (default source: phone camera http://192.0.0.4:8080/video)
+echo      scripts\run_detection.bat --source webcam
+echo      scripts\run_detection.bat --source video --path data\videos\bus_video.mp4
+echo   3. scripts\run_dashboard.bat            (conductor dashboard at http://127.0.0.1:8501)
+echo   Demo data: .venv\Scripts\python.exe scripts\generate_dummy_data.py
 endlocal
+exit /b 0
+
+:wrong_venv
+echo Python 3.11 is required, but .venv uses a different version. Delete the .venv folder and run this script again.
+exit /b 1
+:venv_failed
+echo [ERROR] Could not create .venv
+exit /b 1
+:no_requirements
+echo [ERROR] requirements.txt not found in the project root.
+exit /b 1
+:install_failed
+echo [ERROR] Dependency installation failed. See the messages above.
+exit /b 1
+:db_failed
+echo [ERROR] Database initialization failed. See the messages above.
+exit /b 1

@@ -1,23 +1,108 @@
 # AI Ticketless Passenger Detection - configuration
-# Other modules may add their own top-level sections below.
+#
+# Every key is optional; the values below are the built-in defaults.
+# Precedence: built-in defaults < this file < .env < environment (TPD_*) < command-line flags.
+# Relative paths are resolved against the project root, never the current directory.
+# Wrong types or out-of-range values stop the program with "<section.key>: <problem>".
+
+app:
+  timezone: "Asia/Kolkata"          # IANA name; local day boundaries for dashboard filters and travel dates
+
+logging:
+  level: "INFO"                     # DEBUG | INFO | WARNING | ERROR  (TPD_LOG_LEVEL, --log-level)
+  dir: "logs"                       # rotating logs/app.log (1 MB x 3); the dashboard writes logs/dashboard.log
+
+database:
+  path: "data/ticketless.db"        # ONE database for detection, ticket checks, dashboard and demo data (TPD_DB_PATH, --db)
+  busy_timeout_ms: 5000             # wait this long for a lock held by another process (100..60000)
+  flush_interval_sec: 1.0           # detection-record batch flush + heartbeat cadence (0.2..10)
 
 camera:
-  # Primary video source.
-  #   Android IP camera (e.g. "IP Webcam" app): "http://<phone-ip>:8080/video"
-  #   Local webcam: 0 (or 1, 2 ... for other devices)
-  #   Video file:  "path/to/video.mp4"
-  source: "http://192.0.0.4:8080/video"
+  # Which video source to use: "phone", "webcam" or "video" (TPD_SOURCE, --source).
+  source_type: "phone"
 
-  # If the primary source fails, try the local webcam below.
-  fallback_to_webcam: true
-  webcam_index: 0
+  # Android IP camera stream (e.g. the "IP Webcam" app). The phone and this computer must be on
+  # the same reachable Wi-Fi/hotspot and the streaming app must be running.
+  # Override without editing this file: --url http://<ip>:8080/video or TPD_PHONE_URL.
+  phone:
+    url: "http://192.0.0.4:8080/video"
 
-  # Connection handling (seconds)
-  open_timeout_sec: 10
-  read_timeout_sec: 5
-  reconnect_attempts: 3
-  reconnect_delay_sec: 2
+  # Laptop / USB webcam (0 = first camera). Override: --camera-index 1 or TPD_CAMERA_INDEX.
+  webcam:
+    index: 0
 
-  # Optional capture resolution (null = source default)
-  frame_width: null
+  # Recorded video file, relative to the project root. Override: --path <file>, --choose-file or TPD_VIDEO_PATH.
+  video:
+    path: "data/videos/bus_video.mp4"
+    allowed_extensions: [".mp4", ".avi", ".mov", ".mkv"]
+
+  # Phone only: use the webcam if the phone stream cannot be opened (off so camera errors stay visible).
+  fallback_to_webcam: false
+
+  # Reconnect behaviour for live sources (phone / webcam). Not used for recorded video.
+  reconnect:
+    enabled: true
+    attempts: 5                     # 1..50
+    delay_seconds: 2                # 0..30
+
+  open_timeout_sec: 10              # 1..60
+  read_timeout_sec: 5               # 1..60
+  frame_width: null                 # null = source default, or 160..3840
   frame_height: null
+
+detection:
+  model_path: "models/yolov8n.pt"   # see models/README.md; never auto-downloaded (TPD_MODEL_PATH, --model)
+  device: "cpu"                     # cpu | auto (cuda:0 when available, else cpu) | cuda:N  (TPD_DEVICE, --device)
+  confidence: 0.35                  # person acceptance threshold and ByteTrack new_track_thresh (0.05..0.95, --conf)
+  iou: 0.5                          # NMS IoU (0.1..0.95)
+  imgsz: 640                        # inference size, multiple of 32 (160..1920)
+  record_interval_sec: 1.0          # at most one detection record per Track ID per interval (0.1..60)
+
+tracking:
+  tracker_config: "config/bytetrack.yaml"   # ByteTrack parameters (track_buffer = occlusion tolerance)
+  max_missing_frames: 90            # forget a Track ID not seen for this many frames (1..10000)
+  input_confidence: 0.1             # conf= passed to the tracker so low-score boxes keep tracks alive
+                                    # (0.01..0.5, must be <= track_low_thresh in bytetrack.yaml)
+
+boarding:
+  min_frames_seen: 3                # a Track ID must be seen in >= N frames before its crossing counts (1..300)
+  entry_line:
+    orientation: "horizontal"       # horizontal (line at y = position) | vertical (x = position)
+    position: 0.5                   # 0..1 of the frame height/width when normalized
+    normalized: true
+    span_start: null                # optional extent of the line along its length
+    span_end: null
+    entry_direction: "top_to_bottom"   # top_to_bottom | bottom_to_top | left_to_right | right_to_left
+    cooldown_seconds: 2.0           # also the time a pending crossing has to reach min_frames_seen
+    hysteresis_px: 5.0              # band around the line that suppresses jitter
+    anchor: "bottom_center"         # bottom_center (feet) | center
+    track_timeout_seconds: 30.0
+
+qr:
+  enabled: true                     # scan QR tickets in camera frames (--no-qr disables)
+  scan_every_n_frames: 3            # 1..60
+  rescan_cooldown_sec: 5.0          # the same QR code is ignored for this long
+  fallback_window_sec: 30.0         # link a QR code to the single boarding within this window
+
+route:
+  route_id: "R1"
+  name: "City Express"
+  stations: ["Central Bus Stand", "Market Road", "City Hospital", "College Gate", "Railway Station", "Airport"]
+
+journey:
+  direction: "outbound"             # outbound = stations in the order above; inbound = reversed
+  current_station: "City Hospital"  # must be on the route, or null to skip station checks (TPD_CURRENT_STATION, --station)
+  trip_id: null                     # null -> "<route_id>-<direction>-<local YYYY-MM-DD>" (--trip-id)
+
+alerts:
+  verification_timeout_sec: 60      # boarding still "Ticket verification required" after this -> alert (5..3600)
+
+runtime:
+  preview_path: "data/runtime/latest_frame.jpg"   # live preview frame for the dashboard (gitignored)
+  preview_interval_sec: 1.0         # 0 disables preview writing
+  heartbeat_stale_sec: 10           # dashboard treats a silent RUNNING session as stopped (>= 2 x flush_interval_sec)
+
+dashboard:
+  refresh_sec: 5                    # auto-refresh interval (2..60)
+  default_period: "today"           # today | yesterday | last_7_days | all | custom
+  table_limit: 50                   # rows per table (10..500)
