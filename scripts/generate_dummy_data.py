@@ -7,8 +7,10 @@
 Every demo row has ``is_synthetic = 1`` and lives in the same database the
 detection process and the dashboard use (there is no separate demo database).
 Running the script twice changes nothing; ``--reset`` removes only demo rows.
-When demo data for another day already exists, nothing is written and the
-script names that day; ``--reset --generate`` moves the demo data to the new day.
+When demo data for another day already exists and ``--date`` is not given,
+the demo data is moved to today (only demo rows are replaced). With an explicit
+other ``--date`` nothing is written and the script names that day;
+``--reset --generate`` moves the demo data to the new day.
 This file contains no SQL: every write goes through the application's own
 functions in ``app.ticket_validator`` and ``app.passenger_service``.
 
@@ -267,6 +269,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if generate:
             writer = DemoWriter(conn, cfg, day, args.seed)
             existing = existing_demo_day(conn, writer.tz)
+            if existing is not None and existing != day and args.date is None and not args.reset:
+                try:  # default date ("today"): move the old demo data instead of writing nothing
+                    delete_synthetic(conn)
+                except sqlite3.IntegrityError as exc:
+                    print(f"Could not move the demo data from {existing:%Y-%m-%d} to {day:%Y-%m-%d}: "
+                          f"real records still reference demo passengers ({exc})", file=sys.stderr)
+                    print(f"Demo data already exists for {existing:%Y-%m-%d}; nothing was written for "
+                          f"{day:%Y-%m-%d}.", file=sys.stderr)
+                    return 1
+                print(f"Moved demo data from {existing:%Y-%m-%d} to {day:%Y-%m-%d}.")
+                existing = None
             if existing is not None and existing != day:  # the demo keys carry no date: never mix two days
                 print(f"Demo data already exists for {existing:%Y-%m-%d} (and "
                       f"{existing - timedelta(days=1):%Y-%m-%d}); nothing was written for {day:%Y-%m-%d}.")

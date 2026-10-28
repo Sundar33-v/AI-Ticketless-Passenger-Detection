@@ -1,0 +1,24 @@
+[theme]
+base = "dark"
+primaryColor = "#2F6BFF"
+backgroundColor = "#0B1220"
+secondaryBackgroundColor = "#111B2E"
+textColor = "#F5F8FF"
+borderColor = "#1E2A44"
+baseRadius = "0.75rem"
+showSidebarBorder = true
+greenColor = "#22C55E"
+redColor = "#EF4444"
+orangeColor = "#F59E0B"
+violetColor = "#8B5CF6"
+blueColor = "#2F6BFF"
+chartCategoricalColors = ["#2F6BFF", "#22C55E", "#EF4444", "#F59E0B", "#8B5CF6", "#94A3B8"]
+dataframeHeaderBackgroundColor = "#0D1526"
+
+[theme.sidebar]
+backgroundColor = "#0D1526"
+secondaryBackgroundColor = "#111B2E"
+
+[client]
+showSidebarNavigation = false
+toolbarMode = "minimal"

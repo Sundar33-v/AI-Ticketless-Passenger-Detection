@@ -1,6 +1,6 @@
 """Dashboard metrics and tables: pure read-only queries over a sqlite3 connection.
 
-The seven metrics (card order): Valid, Invalid, Total Passenger, Total Detection,
+The seven metrics (card order): Valid Tickets, Invalid Tickets, Total Passenger, Total Detection,
 Expired Tickets, Boarding Events, Tracking IDs. Every metric uses the same
 half-open UTC period ``[start, end)``; ``None`` means unbounded.
 
@@ -21,7 +21,7 @@ import pandas as pd
 
 from app.database import parse_iso, to_iso
 
-PERIOD_CHOICES = ("today", "yesterday", "last_7_days", "all", "custom")
+PERIOD_CHOICES = ("today", "last_24_hours", "yesterday", "last_7_days", "all", "custom")
 OUTCOMES = ("VALID", "INVALID", "EXPIRED", "WRONG_ROUTE", "ALREADY_USED", "VERIFICATION_REQUIRED")
 INVALID_OUTCOMES = ("INVALID", "WRONG_ROUTE", "ALREADY_USED")
 
@@ -30,10 +30,11 @@ TOTAL_PASSENGER_CAPTION = (
     "not linked to a valid ticket (verification required or failed)."
 )
 METRIC_HELP: Dict[str, str] = {
-    "Valid": "Distinct tickets with a VALID check in this period. Repeat scans of one ticket count once.",
-    "Invalid": "Distinct credentials whose check returned Invalid, Wrong route or Already used. "
-               "Expired tickets are counted separately.",
-    "Total Passenger": TOTAL_PASSENGER_CAPTION + " A desk check that is not linked to the passenger's "
+    "Valid Tickets": "Distinct tickets with a VALID check in this period. Repeat scans of one ticket count once.",
+    "Invalid Tickets": "Distinct credentials whose check returned Invalid, Wrong route or Already used "
+                       "(including unrecognised QR codes). Expired tickets are counted separately.",
+    "Total Passenger": "Unique passengers in the selected period (choose Last 24 hours or Today for the current "
+                       "shift). " + TOTAL_PASSENGER_CAPTION + " A desk check that is not linked to the passenger's "
                        "boarding can count the same person twice; select the boarding on the Ticket Check "
                        "page to link them.",
     "Total Detection": "Recorded person-detection samples: the first sighting of each Track ID plus at most "
@@ -60,13 +61,27 @@ def P(col: str) -> str:
     return f"(:start IS NULL OR {col} >= :start) AND (:end IS NULL OR {col} < :end)"
 
 
+# The time a detection session last mattered; the single session-period rule (alerts + sessions table).
+SESSION_AT = "COALESCE(ended_at, last_heartbeat_at, started_at)"
+
+
+def credential_key(alias: str = "") -> str:
+    """SQL expression identifying one presented credential (shared by KPIs, distribution and alerts)."""
+    p = f"{alias}." if alias else ""
+    return f"COALESCE({p}ticket_id, {p}presented_ref, {p}token_hash, 'evt:' || {p}validation_id)"
+
+
 def _midnight(day: date, tz: ZoneInfo) -> str:
     return to_iso(datetime.combine(day, time(0, 0), tzinfo=tz))
 
 
 def period_for(choice: str, tz: Union[ZoneInfo, str], now_utc: datetime,
                custom: Optional[Tuple[date, date]] = None) -> Period:
-    """Convert a local-day choice into UTC bounds (today, yesterday, last_7_days, all, custom)."""
+    """Convert a choice into UTC bounds (today, last_24_hours, yesterday, last_7_days, all, custom).
+
+    ``last_24_hours`` is a rolling half-open window ending at ``now_utc``; the
+    others use local midnights in ``tz``.
+    """
     tz = tz if isinstance(tz, ZoneInfo) else ZoneInfo(str(tz))
     if now_utc.tzinfo is None:
         raise ValueError("now_utc must be timezone-aware")
@@ -74,6 +89,8 @@ def period_for(choice: str, tz: Union[ZoneInfo, str], now_utc: datetime,
     one = timedelta(days=1)
     if choice == "today":
         return Period(_midnight(today, tz), _midnight(today + one, tz))
+    if choice == "last_24_hours":
+        return Period(to_iso(now_utc - timedelta(hours=24)), to_iso(now_utc))
     if choice == "yesterday":
         return Period(_midnight(today - one, tz), _midnight(today, tz))
     if choice == "last_7_days":
@@ -90,6 +107,25 @@ def period_for(choice: str, tz: Union[ZoneInfo, str], now_utc: datetime,
     raise ValueError(f"Unknown period {choice!r}; expected one of {', '.join(PERIOD_CHOICES)}")
 
 
+def comparison_period(period: Period, now: datetime) -> Optional[Period]:
+    """The equally long span just before ``period``, cut at the same point as ``period`` is cut by ``now``.
+
+    "Today" compares today-so-far with yesterday up to the same clock time; rolling
+    and past periods with the preceding span of the same length. None for "All
+    time" (an unbounded side) and for a period that starts in the future.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    if period.start is None or period.end is None:
+        return None
+    start, end = parse_iso(period.start), parse_iso(period.end)
+    length = end - start
+    eff_end = min(end, now.astimezone(timezone.utc))
+    if eff_end <= start:
+        return None
+    return Period(to_iso(start - length), to_iso(eff_end - length))
+
+
 # --------------------------------------------------------------------- metrics
 @dataclass(frozen=True)
 class DashboardMetrics:
@@ -101,7 +137,7 @@ class DashboardMetrics:
     boarding_events: int = 0
     tracking_ids: int = 0
 
-    LABELS = ("Valid", "Invalid", "Total Passenger", "Total Detection", "Expired Tickets", "Boarding Events",
+    LABELS = ("Valid Tickets", "Invalid Tickets", "Total Passenger", "Total Detection", "Expired Tickets", "Boarding Events",
               "Tracking IDs")
 
     def cards(self) -> List[Tuple[str, int, str]]:
@@ -112,8 +148,8 @@ class DashboardMetrics:
         return not any(astuple(self))
 
 
-_DISTINCT_CREDENTIAL = ("SELECT COUNT(DISTINCT COALESCE(ticket_id, presented_ref, token_hash, "
-                        "'evt:' || validation_id)) FROM validation_events WHERE {cond} AND " + P("validated_at"))
+_DISTINCT_CREDENTIAL = ("SELECT COUNT(DISTINCT " + credential_key() + ") FROM validation_events WHERE {cond} AND "
+                        + P("validated_at"))
 _QUERIES = {
     "valid": _DISTINCT_CREDENTIAL.format(cond="outcome = 'VALID'"),
     "invalid": _DISTINCT_CREDENTIAL.format(cond="outcome IN ('INVALID', 'WRONG_ROUTE', 'ALREADY_USED')"),
@@ -172,16 +208,52 @@ def recent_boardings(conn: sqlite3.Connection, period: Period, statuses: Optiona
     return _frame(conn, sql, params)
 
 
+SEARCH_MAX_CHARS = 64
+_VALIDATIONS_FROM = " FROM validation_events v LEFT JOIN boarding_events b ON b.boarding_id = v.boarding_id WHERE "
+
+
+def _like_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _validation_where(period: Period, outcomes: Optional[Sequence[str]], search: Optional[str],
+                      params: Dict) -> str:
+    """WHERE body shared by recent_validations / count_validations (all values are parameters)."""
+    where = P("v.validated_at") + _in_clause("v.outcome", outcomes, params, "o")
+    text = (search or "").strip()[:SEARCH_MAX_CHARS]
+    if text:
+        params["pat"] = "%" + _like_escape(text.upper()) + "%"
+        ticket = ("(UPPER(v.ticket_id) LIKE :pat ESCAPE '\\' OR UPPER(v.presented_ref) LIKE :pat ESCAPE '\\'"
+                  " OR UPPER(v.channel) LIKE :pat ESCAPE '\\')")
+        if text.isdigit():
+            params["track"] = int(text)
+            where += f" AND (b.track_id = :track OR {ticket})"
+        else:
+            where += f" AND {ticket}"
+    return where
+
+
 def recent_validations(conn: sqlite3.Connection, period: Period, outcomes: Optional[Sequence[str]] = None,
-                       limit: int = 50) -> pd.DataFrame:
-    """Newest validations first; ``track_id`` comes from the linked boarding (NULL if none)."""
-    params = {**period.params(), "limit": int(limit)}
+                       limit: int = 50, *, offset: int = 0, search: Optional[str] = None) -> pd.DataFrame:
+    """Newest validations first; ``track_id`` comes from the linked boarding (NULL if none).
+
+    ``search`` matches a ticket ID or channel code substring (case-insensitive,
+    LIKE-escaped) or, when it is all digits, also an exact Track ID.
+    """
+    params = {**period.params(), "limit": int(limit), "offset": max(0, int(offset))}
     sql = ("SELECT v.validation_id, v.validated_at, v.outcome, v.reason, v.ticket_id, v.presented_ref, "
-           "b.track_id, v.boarding_id, v.channel, v.station, v.trip_id, v.is_synthetic "
-           "FROM validation_events v LEFT JOIN boarding_events b ON b.boarding_id = v.boarding_id WHERE "
-           + P("v.validated_at") + _in_clause("v.outcome", outcomes, params, "o")
-           + " ORDER BY v.validated_at DESC, v.validation_id DESC LIMIT :limit")
+           "b.track_id, v.boarding_id, v.channel, v.station, v.trip_id, v.is_synthetic"
+           + _VALIDATIONS_FROM + _validation_where(period, outcomes, search, params)
+           + " ORDER BY v.validated_at DESC, v.validation_id DESC LIMIT :limit OFFSET :offset")
     return _frame(conn, sql, params)
+
+
+def count_validations(conn: sqlite3.Connection, period: Period, outcomes: Optional[Sequence[str]] = None, *,
+                      search: Optional[str] = None) -> int:
+    """Number of rows ``recent_validations`` would page through (same WHERE)."""
+    params = {**period.params()}
+    sql = "SELECT COUNT(*)" + _VALIDATIONS_FROM + _validation_where(period, outcomes, search, params)
+    return int(conn.execute(sql, params).fetchone()[0])
 
 
 def boardings_needing_resolution(conn: sqlite3.Connection, period: Period, limit: int) -> pd.DataFrame:

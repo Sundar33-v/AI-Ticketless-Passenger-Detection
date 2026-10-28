@@ -139,6 +139,11 @@ def build_journey(cfg: AppConfig, *, now: datetime, station: Optional[str] = Non
 
 
 # ------------------------------------------------------------- evaluation
+UNRECOGNISED_QR_REASON = "Unrecognised QR code"
+MALFORMED_TICKET_REASON = "Malformed ticket ID"
+NO_RECORD_QR_REASON = "No ticket record matches this QR code"  # produced by the f-string in evaluate_ticket
+
+
 @dataclass(frozen=True)
 class Decision:
     outcome: Outcome
@@ -158,7 +163,7 @@ def evaluate_ticket(ticket: Optional[TicketRecord], journey: JourneyContext, now
     if not credential_present:
         return Decision(Outcome.VERIFICATION_REQUIRED, "No ticket presented; ticket verification required")
     if not credential_wellformed:
-        reason = "Malformed ticket ID" if credential_type == "ticket_id" else "Unrecognised QR code"
+        reason = MALFORMED_TICKET_REASON if credential_type == "ticket_id" else UNRECOGNISED_QR_REASON
         return Decision(Outcome.INVALID, reason)
     if ticket is None:
         return Decision(Outcome.INVALID, f"No ticket record matches this {label}")

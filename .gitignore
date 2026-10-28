@@ -39,6 +39,8 @@ data/*.mkv
 # Ultralytics output
 runs/
 
+# Labelled evaluation datasets (images show people)
+data/eval/
 # Workflow artifacts
 .agents/
 

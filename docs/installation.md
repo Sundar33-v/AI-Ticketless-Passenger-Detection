@@ -77,8 +77,11 @@ All dependencies are pinned with `==` in `requirements.txt`:
 | lap | 0.5.13 | Assignment solver used by ByteTrack |
 | opencv-python | 5.0.0.93 | Video capture, drawing, QR decoding |
 | numpy | 2.4.6 | Arrays |
-| streamlit | 1.64.0 | Dashboard (`st.fragment` auto-refresh, multipage) |
+| streamlit | 1.64.0 | Dashboard (`st.fragment` auto-refresh, `st.navigation` pages) |
 | pandas | 3.0.6 | Dashboard tables |
+| plotly | 6.9.0 | Dashboard charts (10-minute trend, ticket-status donut) |
+| altair | 6.3.0 | Streamlit dependency (already installed with Streamlit) |
+| jinja2 | 3.1.6 | Table outcome badges via pandas Styler (already installed with Streamlit) |
 | PyYAML | 6.0.3 | Config |
 | qrcode / pillow | 8.2 / 12.3.0 | QR PNG generation |
 | tzdata | 2026.4 | Time zones for `zoneinfo` on Windows |
@@ -95,3 +98,20 @@ scripts\run_dashboard.bat
 ```
 
 The tests don't need the model or a camera. The demo data lets you check the dashboard before connecting a camera.
+
+An existing install only needs `.venv\Scripts\python.exe -m pip install -r requirements.txt` (altair and jinja2 are already present as Streamlit dependencies; only `plotly==6.9.0` is downloaded). The first start of the dashboard, detection, `init_db.py` or `app.evaluate` adds the `model_evaluations` table to the existing database; no row is changed.
+
+The dark theme lives in `.streamlit\config.toml`, which Streamlit reads from the current directory. `scripts\run_dashboard.bat` starts from the repository root; if you start Streamlit yourself, do the same:
+
+```powershell
+cd "e:\AI Ticketless Passenger Detection"
+.venv\Scripts\python.exe -m streamlit run dashboard\app.py --server.address 127.0.0.1
+```
+
+## Tests
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+Stop the detection process before running the tests. The suite fingerprints `data\ticketless.db` and fails if it changed during the run; with detection running it reports that a detection process appears to be running.

@@ -131,7 +131,7 @@ def test_empty_database_is_all_zero(conn):
 
 def test_cards_order_and_help():
     cards = DashboardMetrics(1, 2, 3, 4, 5, 6, 7).cards()
-    assert [c[0] for c in cards] == ["Valid", "Invalid", "Total Passenger", "Total Detection", "Expired Tickets",
+    assert [c[0] for c in cards] == ["Valid Tickets", "Invalid Tickets", "Total Passenger", "Total Detection", "Expired Tickets",
                                      "Boarding Events", "Tracking IDs"]
     assert [c[1] for c in cards] == [1, 2, 3, 4, 5, 6, 7]
     assert "boarded Track IDs not linked to a valid ticket" in TOTAL_PASSENGER_CAPTION
@@ -180,3 +180,88 @@ def test_synthetic_row_count(conn):
                    started_at=local(7), station=None, trip_id="T", is_synthetic=True)
     insert_detections(conn, [_det("demo", 1, local(7), synthetic=True)])
     assert synthetic_row_count(conn) == 2
+
+
+# ------------------------------------------------------------ pro dashboard additions
+_PRE_CHANGE_VALID = ("SELECT COUNT(DISTINCT COALESCE(ticket_id, presented_ref, token_hash, 'evt:' || validation_id)) "
+                     "FROM validation_events WHERE outcome = 'VALID' AND (:start IS NULL OR validated_at >= :start) "
+                     "AND (:end IS NULL OR validated_at < :end)")
+_PRE_CHANGE_INVALID = _PRE_CHANGE_VALID.replace("outcome = 'VALID'",
+                                                "outcome IN ('INVALID', 'WRONG_ROUTE', 'ALREADY_USED')")
+_PRE_CHANGE_EXPIRED = _PRE_CHANGE_VALID.replace("outcome = 'VALID'", "outcome = 'EXPIRED'")
+
+
+def test_credential_key_keeps_kpi_sql_byte_identical():
+    from app.analytics import _QUERIES, credential_key
+
+    assert credential_key() == "COALESCE(ticket_id, presented_ref, token_hash, 'evt:' || validation_id)"
+    assert credential_key("v") == "COALESCE(v.ticket_id, v.presented_ref, v.token_hash, 'evt:' || v.validation_id)"
+    assert _QUERIES["valid"] == _PRE_CHANGE_VALID
+    assert _QUERIES["invalid"] == _PRE_CHANGE_INVALID
+    assert _QUERIES["expired_tickets"] == _PRE_CHANGE_EXPIRED
+
+
+def test_last_24_hours_is_rolling_half_open():
+    p = period_for("last_24_hours", IST, NOW)
+    assert p == Period("2026-09-27T12:00:00.000000Z", "2026-09-28T12:00:00.000000Z")
+    later = period_for("last_24_hours", IST, NOW + timedelta(minutes=5))
+    assert later.start == "2026-09-27T12:05:00.000000Z" and later.end == "2026-09-28T12:05:00.000000Z"
+
+
+def test_validation_search_count_and_offset(conn, cfg):
+    from app.analytics import count_validations
+
+    _build(conn, cfg)
+    today = period_for("today", IST, local(12))
+    assert count_validations(conn, today) == 7
+    found = recent_validations(conn, today, search="tkt-99")
+    assert len(found) == 2 and set(found["presented_ref"]) == {"TKT-999"}
+    assert count_validations(conn, today, search="tkt-99") == 2
+    assert set(recent_validations(conn, today, search="5")["track_id"]) == {5}
+    assert len(recent_validations(conn, today, search="%")) == 0          # wildcard escaped
+    assert len(recent_validations(conn, today, search="TKT_1")) == 0      # underscore escaped
+    assert len(recent_validations(conn, today, search="'; DROP TABLE validation_events; --")) == 0
+    assert count_validations(conn, today) == 7
+    page1 = recent_validations(conn, today, limit=3)
+    page2 = recent_validations(conn, today, limit=3, offset=3)
+    assert len(page1) == 3 and len(page2) == 3
+    assert not set(page1["validation_id"]) & set(page2["validation_id"])
+    assert count_validations(conn, today, ["EXPIRED"], search="tkt") == 1
+
+
+def test_validation_search_matches_channel_code(conn, cfg):
+    from app.analytics import count_validations
+
+    _build(conn, cfg)
+    today = period_for("today", IST, local(12))
+    assert count_validations(conn, today, search="camera") == 7
+    assert count_validations(conn, today, search="CAM") == 7
+    assert count_validations(conn, today, search="dashboard") == 0
+
+
+# ------------------------------------------------------------ comparison period (KPI deltas)
+def test_comparison_period_today_is_yesterday_up_to_same_clock_time():
+    from app.analytics import comparison_period
+
+    prev = comparison_period(period_for("today", IST, NOW), NOW)   # NOW = 17:30 IST
+    assert prev == Period("2026-09-26T18:30:00.000000Z", "2026-09-27T12:00:00.000000Z")
+
+
+def test_comparison_period_rolling_and_past_periods():
+    from app.analytics import comparison_period
+
+    assert comparison_period(period_for("last_24_hours", IST, NOW), NOW) == Period(
+        "2026-09-26T12:00:00.000000Z", "2026-09-27T12:00:00.000000Z")
+    assert comparison_period(period_for("yesterday", IST, NOW), NOW) == Period(
+        "2026-09-25T18:30:00.000000Z", "2026-09-26T18:30:00.000000Z")
+
+
+def test_comparison_period_none_for_all_time_and_future_ranges():
+    from app.analytics import comparison_period
+
+    assert comparison_period(Period(None, None), NOW) is None
+    assert comparison_period(Period("2026-01-01T00:00:00.000000Z", None), NOW) is None
+    future = period_for("custom", IST, NOW, (date(2026, 10, 5), date(2026, 10, 6)))
+    assert comparison_period(future, NOW) is None
+    with pytest.raises(ValueError):
+        comparison_period(period_for("today", IST, NOW), datetime(2026, 9, 28, 12, 0))

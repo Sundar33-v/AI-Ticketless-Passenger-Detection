@@ -159,6 +159,69 @@ CREATE INDEX IF NOT EXISTS idx_validation_time ON validation_events(validated_at
 CREATE INDEX IF NOT EXISTS idx_validation_outcome ON validation_events(outcome, validated_at);
 CREATE INDEX IF NOT EXISTS idx_validation_ticket ON validation_events(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_validation_boarding ON validation_events(boarding_id);
+
+-- Labelled model evaluations (app/evaluation.py is the only writer). Separate from operational counters.
+CREATE TABLE IF NOT EXISTS model_evaluations (
+  evaluation_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  evaluated_at     TEXT NOT NULL,
+  method           TEXT NOT NULL CHECK (method IN ('images', 'mot', 'import')),
+  model_name       TEXT NOT NULL CHECK (length(model_name) BETWEEN 1 AND 200),
+  model_version    TEXT NOT NULL CHECK (length(model_version) BETWEEN 1 AND 200),
+  dataset_name     TEXT NOT NULL CHECK (length(dataset_name) BETWEEN 1 AND 200),
+  test_set_size    INTEGER NOT NULL CHECK (test_set_size >= 1),
+  gt_boxes         INTEGER NOT NULL CHECK (gt_boxes >= 0),
+  pred_boxes       INTEGER NOT NULL CHECK (pred_boxes >= 0),
+  tp INTEGER NOT NULL CHECK (tp >= 0),
+  fp INTEGER NOT NULL CHECK (fp >= 0),
+  fn INTEGER NOT NULL CHECK (fn >= 0),
+  img_tp INTEGER CHECK (img_tp IS NULL OR img_tp >= 0),
+  img_fp INTEGER CHECK (img_fp IS NULL OR img_fp >= 0),
+  img_fn INTEGER CHECK (img_fn IS NULL OR img_fn >= 0),
+  img_tn INTEGER CHECK (img_tn IS NULL OR img_tn >= 0),
+  accuracy  REAL CHECK (accuracy  IS NULL OR (accuracy  BETWEEN 0 AND 1)),
+  precision REAL CHECK (precision IS NULL OR (precision BETWEEN 0 AND 1)),
+  recall    REAL CHECK (recall    IS NULL OR (recall    BETWEEN 0 AND 1)),
+  f1        REAL CHECK (f1        IS NULL OR (f1        BETWEEN 0 AND 1)),
+  iou_threshold    REAL NOT NULL CHECK (iou_threshold > 0 AND iou_threshold <= 1),
+  conf_threshold   REAL CHECK (conf_threshold IS NULL OR (conf_threshold > 0 AND conf_threshold < 1)),
+  positive_class   TEXT NOT NULL DEFAULT 'person' CHECK (positive_class = 'person'),
+  averaging        TEXT NOT NULL DEFAULT 'micro' CHECK (averaging = 'micro'),
+  config_json      TEXT NOT NULL,
+  notes            TEXT CHECK (notes IS NULL OR length(notes) <= 500),
+  CHECK (length(config_json) <= 20000),
+  CHECK (tp + fp = pred_boxes AND tp + fn = gt_boxes),
+  CHECK ((img_tp IS NULL AND img_fp IS NULL AND img_fn IS NULL AND img_tn IS NULL)
+      OR (img_tp IS NOT NULL AND img_fp IS NOT NULL AND img_fn IS NOT NULL AND img_tn IS NOT NULL
+          AND img_tp + img_fp + img_fn + img_tn = test_set_size)));
+CREATE INDEX IF NOT EXISTS idx_model_evaluations_at ON model_evaluations(evaluated_at);
+
+-- Manual (dashboard-entered) evaluation runs. app/metric_evaluation.py is the only writer.
+-- Separate from model_evaluations (pipeline results) and from all operational tables.
+CREATE TABLE IF NOT EXISTS metric_evaluations (
+  run_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  evaluated_at        TEXT NOT NULL,
+  mode                TEXT NOT NULL DEFAULT 'manual' CHECK (mode = 'manual'),
+  tp INTEGER NOT NULL CHECK (tp BETWEEN 0 AND 10000000),
+  tn INTEGER NOT NULL CHECK (tn BETWEEN 0 AND 10000000),
+  fp INTEGER NOT NULL CHECK (fp BETWEEN 0 AND 10000000),
+  fn INTEGER NOT NULL CHECK (fn BETWEEN 0 AND 10000000),
+  accuracy_pct  REAL CHECK (accuracy_pct  IS NULL OR accuracy_pct  BETWEEN 0 AND 100),
+  precision_pct REAL CHECK (precision_pct IS NULL OR precision_pct BETWEEN 0 AND 100),
+  recall_pct    REAL CHECK (recall_pct    IS NULL OR recall_pct    BETWEEN 0 AND 100),
+  f1_pct        REAL CHECK (f1_pct        IS NULL OR f1_pct        BETWEEN 0 AND 100),
+  model_name          TEXT CHECK (model_name IS NULL OR length(model_name) BETWEEN 1 AND 200),
+  model_version       TEXT CHECK (model_version IS NULL OR length(model_version) BETWEEN 1 AND 200),
+  dataset_description TEXT NOT NULL CHECK (length(dataset_description) BETWEEN 1 AND 200),
+  CHECK (tp + tn + fp + fn >= 1));
+CREATE INDEX IF NOT EXISTS idx_metric_evaluations_at ON metric_evaluations(evaluated_at);
+
+-- Conductor read status of derived alert groups (app/alert_reads.py is the only writer; the dashboard
+-- calls it from dashboard/components/notifications.py). Notifications themselves are derived live from
+-- validation_events / boarding_events / detection_sessions; this table stores only how far each group was read.
+CREATE TABLE IF NOT EXISTS alert_reads (
+  alert_key    TEXT PRIMARY KEY CHECK (length(alert_key) BETWEEN 1 AND 200),
+  last_at_seen TEXT NOT NULL,            -- to_iso() of the group's last_at when it was marked read
+  read_at      TEXT NOT NULL);           -- to_iso() wall time of the mark
 """
 
 

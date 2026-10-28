@@ -18,12 +18,15 @@ from app.database import (
 )
 
 TABLES = {"system_settings", "passengers", "tickets", "detection_sessions", "detection_records",
-          "boarding_events", "validation_events"}
+          "boarding_events", "validation_events", "model_evaluations", "metric_evaluations", "alert_reads"}
 INDEXES = {
     "idx_tickets_passenger", "idx_tickets_status", "idx_tickets_travel_date", "idx_sessions_started",
     "idx_detections_time", "idx_detections_track", "idx_boarding_time", "idx_boarding_status",
     "idx_validation_time", "idx_validation_outcome", "idx_validation_ticket", "idx_validation_boarding",
+    "idx_model_evaluations_at", "idx_metric_evaluations_at",
 }
+NEW_TABLES = ("metric_evaluations", "alert_reads")
+NEW_INDEXES = ("idx_metric_evaluations_at",)
 T0 = "2026-01-15T05:00:00.000000Z"
 T1 = "2026-01-15T23:00:00.000000Z"
 
@@ -94,6 +97,79 @@ def test_created_at_is_written_once(database):
         c.close()
     assert first == again
 
+
+def test_additive_migration_keeps_existing_rows(tmp_path):
+    """A populated pre-change (v1 without model_evaluations) DB gains the table; no row is touched."""
+    db = Database(tmp_path / "old.db")
+    db.initialize()
+    c = db.connect()
+    try:
+        c.execute("DROP INDEX idx_model_evaluations_at")
+        c.execute("DROP TABLE model_evaluations")  # simulate the schema before this change
+        _session(c)
+        _passenger(c)
+        _ticket(c)
+        old_tables = {t for t in TABLES if t != "model_evaluations"}
+        before = {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in old_tables}
+    finally:
+        c.close()
+    db.initialize()
+    c = db.connect()
+    try:
+        after = {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in old_tables}
+        assert after == before and before["tickets"] == 1
+        assert "model_evaluations" in _names(c, "table") and "idx_model_evaluations_at" in _names(c, "index")
+        assert c.execute("SELECT value FROM system_settings WHERE key='schema_version'").fetchone()[0] == "1"
+    finally:
+        c.close()
+
+
+def test_metric_table_added_to_old_db(tmp_path):
+    """A populated DB from before the metrics change gains metric_evaluations; no row is touched."""
+    db = Database(tmp_path / "old.db")
+    db.initialize()
+    c = db.connect()
+    try:
+        for name in NEW_INDEXES:
+            c.execute(f"DROP INDEX {name}")
+        for name in NEW_TABLES:
+            c.execute(f"DROP TABLE {name}")
+        _session(c)
+        _passenger(c)
+        _ticket(c)
+        old_tables = TABLES - set(NEW_TABLES)
+        before = {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in old_tables}
+    finally:
+        c.close()
+    db.initialize()
+    db.initialize()  # idempotent
+    c = db.connect()
+    try:
+        after = {t: c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in old_tables}
+        assert after == before and before["tickets"] == 1
+        assert set(NEW_TABLES) <= _names(c, "table") and set(NEW_INDEXES) <= _names(c, "index")
+        assert c.execute("SELECT value FROM system_settings WHERE key='schema_version'").fetchone()[0] == "1"
+    finally:
+        c.close()
+
+
+def test_new_db_has_no_account_tables(conn):
+    """The dashboard has no sign-in: new databases get no users/auth_throttle and no FK to users."""
+    assert not {"users", "auth_throttle"} & _names(conn, "table")
+    assert conn.execute("PRAGMA foreign_key_list(metric_evaluations)").fetchall() == []
+    columns = {r["name"] for r in conn.execute("PRAGMA table_info(metric_evaluations)")}
+    assert "created_by_user_id" not in columns
+
+
+def test_metric_evaluations_rejects_total_zero(conn):
+    sql = ("INSERT INTO metric_evaluations (evaluated_at, tp, tn, fp, fn, dataset_description) "
+           "VALUES (?, ?, ?, ?, ?, 'set')")
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (T0, 0, 0, 0, 0))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(sql, (T0, -1, 2, 0, 0))
+    conn.execute(sql, (T0, 1, 0, 0, 0))
+    assert conn.execute("SELECT COUNT(*) FROM metric_evaluations").fetchone()[0] == 1
 
 def test_every_index_in_schema_is_known():
     for name in INDEXES:

@@ -61,7 +61,8 @@ def test_init_db_creates_every_table(db_path, capsys):
     tables = {r[0] for r in query(db_path, "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert set(init_db.TABLES) <= tables
     out = capsys.readouterr().out
-    assert f"Database: {db_path}" in out and "validation_events" in out
+    assert f"Database: {db_path}" in out and "validation_events" in out and "model_evaluations" in out
+    assert "metric_evaluations" in out and "users" not in out and "auth_throttle" not in out
 
 
 def test_init_db_is_idempotent(db_path):
@@ -165,3 +166,14 @@ def test_generate_qr_rejects_bad_input(db_path, tmp_path, capsys):
         generate_qr.main(base + ["--rotate"])
     assert generate_qr.main(base + ["--ticket-id", "TKT-NOPE", "--rotate"]) == 1
     assert query(db_path, "SELECT COUNT(*) FROM tickets") == [(0,)]
+
+
+def test_evaluate_help_exits_zero():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    result = subprocess.run([sys.executable, "-m", "app.evaluate", "--help"], cwd=root, capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0 and "images" in result.stdout and "import" in result.stdout

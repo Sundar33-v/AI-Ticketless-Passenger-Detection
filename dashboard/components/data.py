@@ -12,13 +12,15 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
-from typing import Iterator, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import streamlit as st
 
 import app.config as app_config
 from app.config import load_config, resolve_db_path
 from app.database import Database, DatabaseError
+from app.evaluation import StoredEvaluation, list_evaluations
+from app.metric_evaluation import StoredManualEvaluation, list_manual_evaluations
 from app.settings_schema import AppConfig, ConfigError
 
 
@@ -45,7 +47,7 @@ def get_database() -> Database:
 @st.cache_resource(show_spinner=False)
 def _get_database(path: str, busy_timeout_ms: int) -> Database:
     database = Database(path, busy_timeout_ms)
-    database.initialize()  # creates tables only; the main page writes no records
+    database.initialize()  # creates missing tables only (idempotent); it writes no records
     return database
 
 
@@ -71,9 +73,38 @@ def read_conn() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def evaluations(limit: int = 10) -> List[StoredEvaluation]:
+    """Stored model evaluations, newest first (cached 30 s; they change only via app.evaluate)."""
+    return _evaluations(db_path(), int(limit))
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _evaluations(path: str, limit: int) -> List[StoredEvaluation]:
+    # path is the cache key; the read goes through the cached Database for that path.
+    with read_conn() as conn:
+        return list_evaluations(conn, limit)
+
+
+def latest_evaluation() -> Optional[StoredEvaluation]:
+    rows = evaluations(10)
+    return rows[0] if rows else None
+
+
+def manual_evaluations(limit: int = 10) -> List[StoredManualEvaluation]:
+    """Saved manual evaluation runs, newest first (uncached, so a new Save is listed in the same run)."""
+    with read_conn() as conn:
+        return list_manual_evaluations(conn, int(limit))
+
+
 @contextmanager
 def write_conn() -> Iterator[sqlite3.Connection]:
-    """A new read-write connection (Ticket Check page only), closed afterwards."""
+    """A new read-write connection, closed afterwards.
+
+    Allowed callers only (tests/test_dashboard_pages.py enforces the list): ``1_Ticket_Check.py``
+    (validation events), ``metrics_panel.py`` (metric_evaluations, on an explicit Save only) and
+    ``notifications.py`` (alert_reads, on an explicit Mark as read / Mark all / Notify Conductor only).
+    Page views never write.
+    """
     conn = get_database().connect()
     try:
         yield conn

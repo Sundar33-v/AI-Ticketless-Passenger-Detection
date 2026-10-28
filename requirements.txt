@@ -16,6 +16,11 @@ numpy==2.4.6
 # Dashboard and analytics
 streamlit==1.64.0
 pandas==3.0.6
+# Dashboard charts (gradient area trend, ticket-status donut)
+plotly==6.9.0
+# Charts and table badges (already installed as Streamlit dependencies; pinned because the code imports them)
+altair==6.3.0
+jinja2==3.1.6
 
 # Configuration
 PyYAML==6.0.3

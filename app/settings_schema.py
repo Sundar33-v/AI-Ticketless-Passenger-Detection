@@ -27,7 +27,7 @@ STREAM_SCHEMES = ("http", "https", "rtsp", "rtmp")
 DEFAULT_STATIONS = ("Central Bus Stand", "Market Road", "City Hospital", "College Gate", "Railway Station", "Airport")
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 JOURNEY_DIRECTIONS = ("outbound", "inbound")
-DASHBOARD_PERIODS = ("today", "yesterday", "last_7_days", "all", "custom")
+DASHBOARD_PERIODS = ("today", "last_24_hours", "yesterday", "last_7_days", "all", "custom")
 BOARDING_DIRECTIONS = ("top_to_bottom", "bottom_to_top", "left_to_right", "right_to_left")
 ENTRY_LINE_DEFAULTS: Mapping[str, Any] = {
     "orientation": "horizontal", "position": 0.5, "normalized": True, "span_start": None, "span_end": None,

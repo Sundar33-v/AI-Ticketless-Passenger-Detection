@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import re
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -9,6 +11,10 @@ from zoneinfo import ZoneInfo
 
 import generate_dummy_data
 from app.analytics import TOTAL_PASSENGER_CAPTION, DashboardMetrics
+from dashboard.components.cards import KPI_SPECS
+from dashboard.components.metrics import PERIOD_EMPTY_MESSAGE
+from dashboard.components.status import COMPACT_OFF
+from dashboard.components.theme import BRAND_TITLE, TICKETLESS_TERMS
 from app.database import Database, utc_now
 from app.passenger_service import insert_boarding, insert_session
 from app.qr_service import encode_payload, write_qr_png
@@ -16,7 +22,7 @@ from app.settings_schema import AppConfig
 from app.ticket_validator import TicketValidator, build_journey, issue_ticket
 
 TZ = ZoneInfo("Asia/Kolkata")
-LABELS = ["Valid", "Invalid", "Total Passenger", "Total Detection", "Expired Tickets", "Boarding Events",
+LABELS = ["Valid Tickets", "Invalid Tickets", "Total Passenger", "Total Detection", "Expired Tickets", "Boarding Events",
           "Tracking IDs"]
 TABLES = ("system_settings", "passengers", "tickets", "detection_sessions", "detection_records",
           "boarding_events", "validation_events")
@@ -104,8 +110,60 @@ def run(at):
     return at
 
 
+def kpi(at):
+    """The seven operational ``st.metric`` cards (Reports)."""
+    return at.metric[:7]
+
+
 def metric_values(at):
-    return [m.value for m in at.metric]
+    return [m.value for m in kpi(at)]
+
+
+def raw_html(at):
+    """The unmodified ``st.html`` bodies (incl. the allowed TICKETLESS_TERMS phrases)."""
+    return [h.proto.body for h in at.get("html")]
+
+
+def kpi_values(at):
+    """``{slug: value}`` of the Dashboard's five HTML KPI cards, in card order."""
+    body = next(b for b in raw_html(at) if 'class="tpd-kpis"' in b)
+    return {slug: int(value) for slug, value in re.findall(r'data-kpi="([a-z]+)" data-value="(\d+)"', body)}
+
+
+def kpi_title(at, slug):
+    body = next(b for b in raw_html(at) if 'class="tpd-kpis"' in b)
+    return html.unescape(re.search(rf'data-kpi="{slug}"[^>]*title="([^"]*)"', body).group(1))
+
+
+def validation_rows(at):
+    """Raw outcome codes of the Dashboard's validation table rows, newest first."""
+    body = next(b for b in raw_html(at) if 'class="tpd-table"' in b)
+    return re.findall(r'<tr data-outcome="([A-Z_]+)">', body)
+
+
+def bell_label(at):
+    """The bell badge's ``data-count`` ("7", "99+", "0", "–", "…")."""
+    body = " ".join(raw_html(at))
+    return re.search(r'class="tpd-bell-badge-wrap" data-count="([^"]*)"', body).group(1)
+
+
+def frame_with(at, *cols):
+    seen = [list(f.value.columns) for f in at.dataframe]
+    for frame in at.dataframe:
+        if set(cols) <= set(frame.value.columns):
+            return frame.value
+    raise AssertionError(f"no dataframe with columns {cols}; seen {seen}")
+
+
+def strip_allowed(text):
+    """Remove the brand title and the allowed failed-check phrases (theme.TICKETLESS_TERMS)."""
+    for term in (BRAND_TITLE, *TICKETLESS_TERMS):
+        text = text.replace(term, "")
+    return text
+
+
+def html_texts(at):
+    return [strip_allowed(b) for b in raw_html(at)]
 
 
 def rendered_texts(at):
@@ -116,68 +174,121 @@ def rendered_texts(at):
             value = str(element.value)
             if kind == "caption" and value.startswith("Database: "):
                 continue
-            texts.append(value)
+            texts.append(strip_allowed(value))
     for metric in at.metric:
         texts += [metric.label, str(metric.value), metric.proto.help]
     for frame in at.dataframe:
         texts += [str(c) for c in frame.value.columns]
         texts += [str(v) for v in frame.value.to_numpy().ravel()]
+    texts += html_texts(at)
+    texts += [e.label for e in at.get("expander")]
     return texts
 
 
 def submit_ticket_id(at, ticket_id):
     at.radio[0].set_value("Enter ticket ID")
     at.text_input[0].input(ticket_id)
-    at.button[0].click()
+    check_button(at).click()
     return run(at)
+
+
+def check_button(at):
+    """The Ticket Check submit button (the header bell's buttons come first in the tree)."""
+    return next(b for b in at.button if b.label == "Check ticket")
 
 
 def selectbox(at, label):
     return next(s for s in at.selectbox if s.label == label)
 
 
-# ------------------------------------------------------------------ main page
-def test_empty_db_renders_seven_zero_metrics_and_info(dashboard_app):
+KPI_ORDER = ["valid", "invalid", "passenger", "detection", "expired"]
+DEMO_TODAY = dict(zip(KPI_ORDER, (7, 4, 16, 16, 2)))
+DEMO_ALL = dict(zip(KPI_ORDER, (8, 4, 18, 18, 2)))
+REPORTS = "4_Reports.py"
+
+
+def live_feed_under_router(dashboard_app):
     at = run(dashboard_app)
-    assert [m.label for m in at.metric] == LABELS
+    at.switch_page("pages/2_Live_Feed.py")
+    return run(at)
+
+
+# ------------------------------------------------------------------ main page
+def test_empty_db_renders_five_zero_kpis_and_info(dashboard_app):
+    at = run(dashboard_app)
+    values = kpi_values(at)
+    assert list(values) == KPI_ORDER == [s.slug for s in KPI_SPECS]
+    assert list(values.values()) == [0] * 5
+    assert any("No records yet" in i.value for i in at.info)
+    page = " ".join(raw_html(at))
+    assert "No validation results in this period." in page and validation_rows(at) == []
+    assert "No ticketless passengers" in page and "Ticketless Passenger Detected!" not in page
+    assert at.button(key="dash_notify").disabled
+    assert len(at.get("plotly_chart")) == 2
+
+
+def test_reports_renders_seven_zero_metrics_and_info(open_dashboard, dashboard_db):
+    at = run(open_dashboard(dashboard_db, REPORTS))
+    assert [m.label for m in kpi(at)] == LABELS
     assert metric_values(at) == ["0"] * 7
     assert any("No records yet" in i.value for i in at.info)
-    assert any("No boarding events in this period." == c.value for c in at.caption)
 
 
-def test_metric_labels_follow_dashboard_metrics_order(dashboard_app):
+def test_old_demo_data_shows_period_hint_on_dashboard(dashboard_app, dashboard_db):
+    make_demo(dashboard_db, today_local() - timedelta(days=3))
     at = run(dashboard_app)
-    assert [m.label for m in at.metric] == list(DashboardMetrics.LABELS) == LABELS
+    assert list(kpi_values(at).values()) == [0] * 5
+    assert any(i.value == PERIOD_EMPTY_MESSAGE for i in at.info)
+    assert not any("No records yet" in i.value for i in at.info)
+
+
+def test_old_demo_data_shows_period_hint_on_reports(open_dashboard, dashboard_db):
+    make_demo(dashboard_db, today_local() - timedelta(days=3))
+    at = run(open_dashboard(dashboard_db, REPORTS))
+    assert metric_values(at) == ["0"] * 7
+    assert any(i.value == PERIOD_EMPTY_MESSAGE for i in at.info)
+    assert not any("No records yet" in i.value for i in at.info)
+
+
+def test_metric_labels_follow_dashboard_metrics_order(open_dashboard, dashboard_db):
+    at = run(open_dashboard(dashboard_db, REPORTS))
+    assert [m.label for m in kpi(at)] == list(DashboardMetrics.LABELS) == LABELS
     assert len(at.metric) == 7
 
 
-def test_total_passenger_caption(dashboard_app, dashboard_db):
+def test_total_passenger_caption(dashboard_app, open_dashboard, dashboard_db):
     make_demo(dashboard_db)
-    at = run(dashboard_app)
-    captions = [c.value for c in at.caption]
+    reports = run(open_dashboard(dashboard_db, REPORTS))
+    captions = [c.value for c in reports.caption]
     assert TOTAL_PASSENGER_CAPTION in captions
     assert any("boarded Track IDs not linked to a valid ticket" in c for c in captions)
+    assert not any("awaiting ticket verification" in t for t in rendered_texts(reports))
+    at = run(dashboard_app)
+    assert TOTAL_PASSENGER_CAPTION in kpi_title(at, "passenger")
     assert not any("awaiting ticket verification" in t for t in rendered_texts(at))
 
 
 def test_demo_db_shows_demo_values(dashboard_app, dashboard_db):
     make_demo(dashboard_db)
     at = run(dashboard_app)
-    assert metric_values(at) == ["7", "4", "16", "50", "2", "15", "16"]
+    assert kpi_values(at) == DEMO_TODAY
     assert any(c.value.startswith("Demo data: ") and "synthetic rows present" in c.value for c in at.caption)
     selectbox(at, "Period").set_value("all")
     run(at)
-    assert metric_values(at) == ["8", "4", "18", "56", "2", "17", "18"]
+    assert kpi_values(at) == DEMO_ALL
 
 
-def test_status_filter_applies_to_tables_only(dashboard_app, dashboard_db):
+def test_status_filter_applies_to_tables_only(dashboard_app, open_dashboard, dashboard_db):
     make_demo(dashboard_db)
     at = run(dashboard_app)
     at.multiselect[0].set_value(["EXPIRED"])
     run(at)
-    assert metric_values(at) == ["7", "4", "16", "50", "2", "15", "16"]
-    boardings, validations = (frame.value for frame in at.dataframe)
-    assert set(validations["Outcome"]) == {"Expired"} and len(validations) == 2
+    assert kpi_values(at) == DEMO_TODAY
+    assert validation_rows(at) == ["EXPIRED", "EXPIRED"]
+    tracking = run(open_dashboard(dashboard_db, "3_Passenger_Tracking.py"))
+    tracking.multiselect[0].set_value(["EXPIRED"])
+    run(tracking)
+    boardings = frame_with(tracking, "Verification status")
     assert set(boardings["Verification status"]) == {"Expired"}
 
 
@@ -195,30 +306,45 @@ def test_rendered_text_uses_verification_wording(dashboard_app, dashboard_db):
     at = run(dashboard_app)
     texts = rendered_texts(at)
     assert texts and not [t for t in texts if "ticketless" in t.lower()]
-    assert "Ticket verification required" in " ".join(texts)
+    assert "Ticket verification required" in " ".join(texts)      # donut legend's Unverified row
 
 
-def test_not_running_shows_message_and_no_preview(dashboard_app, dashboard_db):
+def test_live_feed_text_uses_verification_wording(dashboard_app, dashboard_db):
+    make_demo(dashboard_db)
+    at = live_feed_under_router(dashboard_app)
+    texts = rendered_texts(at)
+    assert texts and not [t for t in texts if "ticketless" in t.lower()]
+    assert "Ticket verification required" in " ".join(texts)      # its alert panel lists unverified boardings
+
+
+def test_not_running_shows_message_and_no_preview(dashboard_app, open_dashboard, dashboard_db):
     make_demo(dashboard_db)
     at = run(dashboard_app)
-    assert any(i.value.startswith("Detection is not running") for i in at.info)
+    assert COMPACT_OFF in " ".join(html_texts(at))
     assert len(at.get("image")) == 0
+    live = run(open_dashboard(dashboard_db, "2_Live_Feed.py"))
+    assert any(i.value.startswith("Detection is not running") for i in live.info)
+    assert len(live.get("image")) == 0
 
 
-def test_running_session_shows_source(dashboard_app, dashboard_db):
+def test_running_session_shows_source(dashboard_app, open_dashboard, dashboard_db):
     add_session(dashboard_db, status="RUNNING")
     at = run(dashboard_app)
-    assert any(s.value.startswith("Detection running – webcam 0") for s in at.success)
-    assert not any(i.value.startswith("Detection is not running") for i in at.info)
+    assert "System Online" in " ".join(html_texts(at))
+    live = run(open_dashboard(dashboard_db, "2_Live_Feed.py"))
+    assert any(c.value == "Latest session source: webcam 0 · Detection: Online" for c in live.caption)
+    assert not any(i.value.startswith("Detection is not running") for i in live.info)
 
 
 def test_cache_is_keyed_by_db_path(open_dashboard, tmp_path):
     demo, empty = tmp_path / "demo.db", tmp_path / "empty.db"
     make_demo(demo)
     first = run(open_dashboard(demo))
+    selectbox(first, "Period").set_value("all")
+    run(first)
     second = run(open_dashboard(empty, clear_cache=False))
-    assert metric_values(first) == ["7", "4", "16", "50", "2", "15", "16"]
-    assert metric_values(second) == ["0"] * 7
+    assert kpi_values(first) == DEMO_ALL
+    assert list(kpi_values(second).values()) == [0] * 5
     assert any(c.value == f"Database: {empty}" for c in second.caption)
 
 
@@ -249,7 +375,7 @@ def test_ticket_check_qr_upload(open_dashboard, dashboard_db, tmp_path):
     png = write_qr_png(encode_payload(token), tmp_path / "ticket.png")
     at = run(open_dashboard(dashboard_db, PAGE))
     at.file_uploader[0].set_value(("ticket.png", png.read_bytes(), "image/png"))
-    at.button[0].click()
+    check_button(at).click()
     run(at)
     assert any(ticket_id in s.value for s in at.success)
     assert query(dashboard_db, "SELECT outcome, credential_type FROM validation_events") == [("VALID", "qr_token")]
@@ -258,13 +384,13 @@ def test_ticket_check_qr_upload(open_dashboard, dashboard_db, tmp_path):
 def test_empty_submit_writes_nothing_unless_no_ticket_ticked(open_dashboard, dashboard_db):
     (boarding,) = add_session(dashboard_db, tracks=1)
     at = run(open_dashboard(dashboard_db, PAGE))
-    at.button[0].click()
+    check_button(at).click()
     run(at)
     assert any("Nothing was checked" in i.value for i in at.info)
     assert query(dashboard_db, "SELECT COUNT(*) FROM validation_events") == [(0,)]
     selectbox(at, "Boarding event (optional)").set_value(boarding)
     at.checkbox[0].check()
-    at.button[0].click()
+    check_button(at).click()
     run(at)
     assert any(w.value.startswith("Ticket verification required – ") for w in at.warning)
     assert query(dashboard_db, "SELECT outcome, credential_type, boarding_id FROM validation_events") == [
@@ -320,7 +446,7 @@ def test_selected_station_is_used_for_the_check(open_dashboard, dashboard_db):
     selectbox(at, "Current station").set_value("Central Bus Stand")  # the ticket's boarding station
     at.radio[0].set_value("Enter ticket ID")
     at.text_input[0].input("TKT-SHORT1")
-    at.button[0].click()
+    check_button(at).click()
     run(at)
     assert query(dashboard_db, "SELECT outcome, station FROM validation_events") == [("VALID", "Central Bus Stand")]
 
@@ -336,3 +462,11 @@ def test_dashboard_never_uses_camera_or_model():
     for path in (Path(__file__).resolve().parents[1] / "dashboard").rglob("*.py"):
         source = path.read_text(encoding="utf-8")
         assert "ultralytics" not in source and "VideoCapture" not in source, path
+
+
+def test_bell_is_a_popover_not_a_button(open_dashboard, dashboard_db):
+    at = run(open_dashboard(dashboard_db, PAGE))
+    assert at.get("popover")[0].proto.popover.label == "Notifications"
+    assert bell_label(at) == "0"
+    assert at.button[0].label == "Check ticket"
+    assert all(getattr(b, "key", None) != "tpd_bell" for b in at.button)

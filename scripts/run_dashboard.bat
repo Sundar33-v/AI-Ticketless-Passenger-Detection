@@ -1,5 +1,5 @@
 @echo off
-REM Start the Streamlit conductor dashboard at http://127.0.0.1:8501 (localhost only: it has no login).
+REM Start the Streamlit conductor dashboard at http://127.0.0.1:8501 (localhost only).
 REM It reads the same SQLite database as scripts\run_detection.bat (TPD_DB_PATH or database.path in
 REM config\config.yaml). Run it in a second terminal while detection is running.
 setlocal

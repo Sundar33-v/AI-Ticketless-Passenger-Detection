@@ -104,5 +104,5 @@ runtime:
 
 dashboard:
   refresh_sec: 5                    # auto-refresh interval (2..60)
-  default_period: "today"           # today | yesterday | last_7_days | all | custom
+  default_period: "today"           # today | last_24_hours | yesterday | last_7_days | all | custom
   table_limit: 50                   # rows per table (10..500)

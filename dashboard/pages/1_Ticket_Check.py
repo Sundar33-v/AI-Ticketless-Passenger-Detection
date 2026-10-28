@@ -1,4 +1,4 @@
-"""Ticket Check: the conductor's manual validation workflow (the dashboard's only write path).
+"""Ticket Check: the conductor's manual validation workflow (the only page that writes ticket checks).
 
 A check is made against the ticket record in the database. QR images carry
 only an opaque token; nothing else in the QR code is trusted. Selecting the
@@ -22,7 +22,6 @@ if "app" in sys.modules and not hasattr(sys.modules["app"], "__path__"):
 import dataclasses  # noqa: E402
 import sqlite3  # noqa: E402
 from typing import Optional, Tuple  # noqa: E402
-from zoneinfo import ZoneInfo  # noqa: E402
 
 import streamlit as st  # noqa: E402
 
@@ -32,7 +31,7 @@ from app.database import parse_iso, utc_now  # noqa: E402
 from app.passenger_service import is_busy_error  # noqa: E402
 from app.qr_service import QRScanner  # noqa: E402
 from app.ticket_validator import Outcome, TicketValidator, build_journey  # noqa: E402
-from dashboard.components import data, filters  # noqa: E402
+from dashboard.components import data, filters, shell  # noqa: E402
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 INPUT_TYPES = ("Scan QR image", "Enter token", "Enter ticket ID")
@@ -40,16 +39,13 @@ NO_STATION = "(not set – skip station checks)"
 RECHECK_HELP = ("Without selecting a boarding, repeat checks of the same ticket on the same trip are treated "
                 "as re-checks (VALID). Select the boarding to detect reuse.")
 
-st.set_page_config(page_title="Ticket Check – Conductor", layout="wide")
-st.title("Ticket Check")
+ctx = shell.start_page("Ticket Checker", filters=False)   # css, require_database, Database caption, header
+cfg = ctx.cfg
+tz = ctx.tz
 st.caption("Check a ticket against the database. A person is never marked as failing a check "
            "until a ticket has actually been checked.")
-
-cfg, _database = data.require_database()
-tz = ZoneInfo(cfg.app.timezone)
-st.sidebar.header("Boardings")
-period = filters.select_period(cfg, utc_now(), key="check_period")
-st.sidebar.caption(f"Database: {data.db_path()}")
+ctx.sidebar.header("Boardings")
+period = filters.select_period(cfg, utc_now(), key="check_period", target=ctx.sidebar)
 
 with data.read_conn() as _conn:
     pending = boardings_needing_resolution(_conn, period, cfg.dashboard.table_limit)

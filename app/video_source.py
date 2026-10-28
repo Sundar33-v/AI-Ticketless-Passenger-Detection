@@ -48,6 +48,21 @@ class CameraConnectionError(RuntimeError):
     """Raised when a camera source (primary or fallback) cannot be opened or read."""
 
 
+# Every CameraConnectionError message below starts with one of these (the dashboard uses them to tell
+# "camera disconnected" from other failures; "Unknown source type" is a configuration error, not listed).
+CAMERA_ERROR_PREFIXES = (
+    "Unable to connect to Android phone camera",   # _phone_help (all phone failures)
+    "Could not open webcam",
+    "Could not open video file",
+    "Unsupported video file type",
+    "Video file",                                  # "Video file not found" / "... contains no readable frames"
+    "Lost connection to",
+    "webcam source ",                              # "<type> source <src> opened but returned no frames."
+    "phone source ",
+    "video source ",
+)
+
+
 def load_camera_config(path: Union[str, Path, None] = None) -> CameraConfig:
     """The ``camera`` section of the full config (defaults < yaml < .env < env)."""
     return load_config(path).camera

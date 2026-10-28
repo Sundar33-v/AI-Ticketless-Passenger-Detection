@@ -264,3 +264,4 @@ def test_configure_logging_unwritable_dir_falls_back_to_console(tmp_path, caplog
             root.removeHandler(handler)
             handler.close()
         root.setLevel(level)
+

@@ -19,7 +19,7 @@ from app.database import Database, DatabaseError
 from app.settings_schema import ConfigError
 
 TABLES = ("system_settings", "passengers", "tickets", "detection_sessions", "detection_records",
-          "boarding_events", "validation_events")
+          "boarding_events", "validation_events", "model_evaluations", "metric_evaluations", "alert_reads")
 
 
 def table_counts(conn: sqlite3.Connection) -> Dict[str, int]:

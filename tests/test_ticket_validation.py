@@ -472,3 +472,12 @@ def test_two_threads_same_ticket_one_valid_one_already_used(db, cfg, journey):
         t.join(30)
     assert not errors
     assert sorted(r.outcome.value for r in results) == ["ALREADY_USED", "VALID"]
+
+
+def test_reason_constants_match_the_rule_texts(cfg):
+    from app.ticket_validator import MALFORMED_TICKET_REASON, NO_RECORD_QR_REASON, UNRECOGNISED_QR_REASON
+
+    j = journey_at(cfg)
+    assert ev(None, j, ctype="qr_token").reason == NO_RECORD_QR_REASON
+    assert ev(None, j, wellformed=False, ctype="qr_token").reason == UNRECOGNISED_QR_REASON
+    assert ev(None, j, wellformed=False, ctype="ticket_id").reason == MALFORMED_TICKET_REASON

@@ -26,7 +26,7 @@ Data flow:
 3. A Track ID that crosses the entry line in the boarding direction, after being seen in at least `boarding.min_frames_seen` frames, becomes one boarding event (at most one per Track ID per session) with status `VERIFICATION_REQUIRED`.
 4. A QR code seen in the camera frame is validated only when it can be linked to a boarded Track ID. The conductor can also check tickets on the dashboard's Ticket Check page or with `scripts/validate_qr.py`.
 5. Every check goes through `app/ticket_validator.py` and is recorded in `validation_events`. The boarding's status is updated.
-6. The dashboard reads the same database read-only and refreshes every `dashboard.refresh_sec` seconds. Only the Ticket Check form writes.
+6. The dashboard reads the same database read-only and refreshes every `dashboard.refresh_sec` seconds. It writes only on explicit actions: the Ticket Check form (ticket checks) and Save Evaluation in the metrics calculator (manual evaluation runs).
 
 Module details, the schema and every rule are in [docs/architecture.md](docs/architecture.md).
 
@@ -46,6 +46,29 @@ cd models
 ```
 
 Manual steps, CPU-only PyTorch and pin notes: [docs/installation.md](docs/installation.md).
+
+### Windows PowerShell quick start
+
+Run each command from the repository root (`cd "e:\AI Ticketless Passenger Detection"`). Use separate terminals for detection and the dashboard.
+
+```powershell
+# 1. Detection pipeline (pick one source)
+scripts\run_detection.bat --source phone --url http://192.0.0.4:8080/video
+scripts\run_detection.bat --source webcam --camera-index 0
+scripts\run_detection.bat --source video --path data\videos\bus_video.mp4
+
+# 2. Dashboard (http://127.0.0.1:8501)
+scripts\run_dashboard.bat
+
+# 3. Model evaluation on a labelled test set, then list stored results
+scripts\run_evaluation.bat images --images data\eval\bus01\images --labels data\eval\bus01\labels
+scripts\run_evaluation.bat list
+
+# Tests (stop detection first)
+.venv\Scripts\python.exe -m pytest -q
+```
+
+The batch files call `.venv\Scripts\python.exe -m app.main`, `-m streamlit run dashboard\app.py --server.address 127.0.0.1 --server.port 8501` and `-m app.evaluate` respectively, so the same arguments work with the direct Python commands.
 
 ## Video sources
 
@@ -148,23 +171,56 @@ Outcomes: `VALID`, `INVALID`, `EXPIRED`, `WRONG_ROUTE`, `ALREADY_USED`, `VERIFIC
 scripts\run_dashboard.bat
 ```
 
-Open http://127.0.0.1:8501. The dashboard reads the same database as detection (the sidebar shows its path). It has a period filter (Today, Yesterday, Last 7 days, All time, Custom range) and a validation-status filter that applies to the tables only.
+Open http://127.0.0.1:8501. The dashboard is a dark-themed Streamlit app (theme in `.streamlit\config.toml`; start it from the repository root, as `run_dashboard.bat` does) that reads the same database as detection (the sidebar shows its path). Six pages share one sidebar: **Dashboard**, **Live Feed**, **Passenger Tracking**, **Ticket Checker**, **Reports** and **Settings**. The header shows the local date and time, the real detection state (Online only while a RUNNING session sends fresh heartbeats), the conductor-console indicator and an alert bell with the unread count. Filters: Today, Last 24 hours, Yesterday, Last 7 days, All time, Custom range, plus a validation-status filter that applies to tables and table exports only. The filters persist across pages.
 
-**Security:** the dashboard has no authentication. `run_dashboard.bat` binds it to `127.0.0.1`, so only this computer can open it. The Ticket Check page can write validation results. Don't expose it on a network without adding authentication.
+**Notifications:** the bell opens a panel of stored alerts (failed checks, unrecognised QR codes, boardings not verified in time, detection problems) with Mark as read and Mark all as read. Read status is saved in the additive `alert_reads` table. After upgrading, restart the dashboard once so the table is created; until then read status lasts for the browser session only. See [docs/user_guide.md](docs/user_guide.md#notification-bell).
 
-The main page shows exactly seven metrics for the selected period:
+**Security:** the dashboard has no sign-in, so anyone who can reach it has full access (ticket checks, saving evaluation runs, marking alerts read). `run_dashboard.bat` binds it to `127.0.0.1`, so only this computer can open it. Add HTTPS, a reverse proxy and access control before exposing it on a network.
+
+Operational metrics, for the selected period (Reports shows all seven; the Dashboard shows five of them as KPI cards, with Total Detection counting Track IDs):
 
 | Metric | Definition |
 |---|---|
-| Valid | Distinct tickets with a VALID check. Repeat scans of one ticket count once. |
-| Invalid | Distinct credentials whose check returned Invalid, Wrong route or Already used. Expired tickets are counted separately. |
+| Valid Tickets | Distinct tickets with a VALID check. Repeat scans of one ticket count once. |
+| Invalid Tickets | Distinct credentials whose check returned Invalid, Wrong route or Already used (including unrecognised QR codes). Expired tickets are counted separately. |
 | Total Passenger | Total Passenger = verified passengers (distinct passenger refs with a valid ticket) + boarded Track IDs not linked to a valid ticket (verification required or failed). |
 | Total Detection | Recorded person-detection samples: the first sighting of each Track ID plus at most one sample per record interval. Not a head count. |
 | Expired Tickets | Distinct tickets whose check failed because the ticket had expired. |
 | Boarding Events | Entry-line crossings confirmed as boardings, at most one per Track ID per session. |
 | Tracking IDs | Distinct Track IDs observed, counted per detection session. |
 
-Below the metrics: detection source status (and a live preview frame while detection runs), verification alerts, recent boarding events and recent validation results. The **Ticket Check** page is where the conductor checks a ticket and resolves failed verifications. See [docs/user_guide.md](docs/user_guide.md).
+The Dashboard itself shows a welcome banner (system status, route), five KPI cards (Valid, Invalid, Total Passenger, Total Detection, Expired Tickets) with the change vs the previous period, a 10-minute passenger trend, a ticket-status donut, the live feed with the latest failed check, the recent validation results (last 10/25/50, searchable) and quick actions, followed by the **AI Model Performance & Metrics Calculator** (Accuracy Score, Precision, Recall and F1-Score cards, see below). Boarding Events, the full alert list and the evaluation history table are on Passenger Tracking, Live Feed and Reports. The **Ticket Checker** page is where the conductor checks a ticket and resolves failed verifications. **Reports** exports summary, validation and boarding CSV files for the selected period. See [docs/user_guide.md](docs/user_guide.md).
+
+The Dashboard charts use Plotly (`plotly==6.9.0`). The table badges use pandas Styler (jinja2); jinja2 and altair were already installed with Streamlit and stay pinned in `requirements.txt` (`altair==6.3.0`, `jinja2==3.1.6`).
+
+### Model evaluation
+
+Model metrics are never computed from ticket records or live, unlabelled detections. They come from a labelled test set (positive class: person; boxes matched one-to-one at IoU ≥ 0.5; Accuracy is image-level person presence). Results are stored in the `model_evaluations` table with the model version, date, test-set size and configuration:
+
+```powershell
+scripts\run_evaluation.bat images --images data\eval\bus01\images --labels data\eval\bus01\labels
+scripts\run_evaluation.bat mot --gt data\eval\bus01\gt.txt --pred "$env:TEMP\pred.txt" --num-frames 900 --model models\yolov8n.pt
+scripts\run_evaluation.bat import --json data\eval\results.json
+scripts\run_evaluation.bat list
+```
+
+No labelled dataset ships with the project, so a fresh install shows N/A. Details: [docs/limitations.md](docs/limitations.md#evaluation-method).
+
+### AI Model Performance & Metrics Calculator
+
+The Dashboard section below Recent Validation Results and Quick Actions has three modes:
+
+- **Dummy dataset (synthetic):** the default when no model evaluation is stored. The panel reads `data/dummy_evaluation_dataset.csv`, counts TP/TN/FP/FN from its per-sample labels with `app.metric_evaluation.confusion_matrix` (which checks TP + TN + FP + FN = total samples) and shows the four cards, the dataset name, a "Synthetic" marker, total samples, TP/TN/FP/FN, evaluation date/time and the evaluation method. **Calculate / Refresh Metrics** re-reads the file; **Regenerate dummy dataset** rewrites it with the fixed-seed generator output. Results are calculated on demand and never saved to the database. A missing, locked or malformed file shows an error and N/A cards.
+  - CSV columns: `sample_id, tracking_id, ground_truth, predicted_label`, where **1 = Ticketless passenger** and **0 = Valid-ticket passenger**. Every `sample_id`/`tracking_id` starts with `SYN-`; files with other rows are rejected by this mode and are never overwritten.
+  - The file is generated by `.venv\Scripts\python.exe scripts\generate_evaluation_dataset.py` (`--seed`, default 20260115; `--samples`, 100..100000, default 200; `--output PATH`). The same seed always produces the same file. An existing file that is not a synthetic dataset is only overwritten with `--force` (CLI only; the dashboard never overwrites it). Exit codes: 0 ok, 1 invalid value, 2 file error or refused overwrite.
+  - `TPD_EVAL_DATASET` points the dashboard and the CLI at another dataset file. It is read from the process environment only, not from `.env`.
+  - **This is synthetic test data.** `predicted_label` is simulated, not produced by the camera or the YOLO model, so these numbers only check the metric calculation and do not reflect real-world accuracy.
+- **Manual evaluation:** enter True Positive, True Negative, False Positive and False Negative counts from a genuine labelled test dataset and press Calculate Metrics. Accuracy = (TP+TN)/(TP+TN+FP+FN)×100, Precision = TP/(TP+FP)×100, Recall = TP/(TP+FN)×100, F1 = 2PR/(P+R); a metric whose denominator is 0 shows N/A. Dashboard ticket counts are never used. Results are labelled "Manual evaluation" and are not verified model performance. Save Evaluation appends the counts, metrics, dataset description and model name/version to the separate `metric_evaluations` table; nothing is saved automatically.
+- **Model evaluation results:** the latest result stored by `python -m app.evaluate` (above). mAP is not computed, and there is no end-to-end ticket decision evaluation.
+
+"Recent Evaluation Runs" lists saved manual runs and stored model evaluations, newest first. In the manual and model modes, with no evaluation the cards show N/A and "No evaluated dataset available. Enter verified evaluation counts or run model evaluation."
+
+All metrics are kept at full precision and displayed rounded to 2 decimals (for example 88.89%). A metric whose denominator is 0 is shown as N/A, never as 0 or 100.
 
 ## Demo data
 
@@ -172,7 +228,7 @@ Below the metrics: detection source status (and a live preview frame while detec
 .venv\Scripts\python.exe scripts\generate_dummy_data.py
 ```
 
-This writes a synthetic, clearly flagged dataset into the same database: 2 detection sessions, 12 demo tickets (`DEMO-TKT-001`..`012`), boardings and validations covering every outcome, and demo QR images in `data\qr_codes\demo\`. It is anchored to today (`--date YYYY-MM-DD` to change it) and re-running it is a no-op. If demo data for another day is already there, the script writes nothing, prints that day and the `--reset --generate` command that moves it to the new day. `--reset` deletes only synthetic rows; `--reset --generate` refreshes them. `--no-qr-images` skips the PNGs. The demo needs the default route R1, outbound, with the default stations. The dashboard sidebar shows when synthetic rows are present.
+This writes a synthetic, clearly flagged dataset into the same database: 2 detection sessions, 12 demo tickets (`DEMO-TKT-001`..`012`), boardings and validations covering every outcome, and demo QR images in `data\qr_codes\demo\`. It is anchored to today (`--date YYYY-MM-DD` to change it) and re-running it is a no-op. If demo data for another day is already there, running the script without `--date` moves it to today (only synthetic rows are replaced); with an explicit other `--date` it writes nothing and prints that day and the `--reset --generate` command that moves it. `--reset` deletes only synthetic rows; `--reset --generate` refreshes them. `--no-qr-images` skips the PNGs. The demo needs the default route R1, outbound, with the default stations. The dashboard sidebar shows when synthetic rows are present.
 
 ## Tests
 
@@ -180,7 +236,7 @@ This writes a synthetic, clearly flagged dataset into the same database: 2 detec
 scripts\run_tests.bat
 ```
 
-or `.venv\Scripts\python.exe -m pytest -q`. Tests run offline, with temporary databases, fake cameras and fake models. They don't need the YOLO weights or a camera, and they never touch `data\ticketless.db`.
+or `.venv\Scripts\python.exe -m pytest -q`. Tests run offline, with temporary databases, fake cameras and fake models. They don't need the YOLO weights or a camera, and they never write `data\ticketless.db` (one test renders the pages against a byte copy of it). Stop the detection process before running the tests; otherwise the repository-database guard fails because detection keeps writing heartbeats.
 
 ## Troubleshooting
 
@@ -215,13 +271,15 @@ Logs: `logs\app.log` (detection) and `logs\dashboard.log`.
 - A Track ID can change after long occlusion, tracker failure, or when a person leaves and re-enters. A new ID can create a second boarding.
 - Total Detection counts throttled samples, not people.
 - QR codes are hard to read at a distance or under motion blur; a missing QR never fails a ticket.
-- The dashboard has no authentication.
+- The dashboard cannot start or stop detection. It has no sign-in or user accounts: anyone who can reach it has full access.
+- The metrics calculator computes no mAP and there is no end-to-end ticket decision evaluation (no verified ground-truth boarding labels exist).
+- Real AI model metrics (manual and model modes) show N/A until a labelled evaluation is run or imported. The dummy dataset mode shows numbers from synthetic data; they are not real-world accuracy.
 
 Full list and the evaluation method (precision, recall, ID switches, false detections): [docs/limitations.md](docs/limitations.md).
 
 ## Future work
 
-- Dashboard authentication and conductor accounts
+- mAP and an end-to-end ticket decision evaluation against verified boarding records
 - Person re-identification to reduce ID switches after re-entry
 - Station updates from the dashboard or GPS to a running detection process
 - GPU deployment and larger models for higher-resolution cameras
@@ -231,12 +289,17 @@ Full list and the evaluation method (precision, recall, ID switches, false detec
 ```
 app/            detection process and shared business logic (config, database, video source,
                 detector, tracker, entry line, passenger service, QR, ticket validation,
-                alerts, analytics, pipeline, overlay, main)
-dashboard/      Streamlit dashboard (app.py, pages/1_Ticket_Check.py, components/)
+                alerts, analytics, pipeline, overlay, main, system_status, trends,
+                tracking_queries, reports, evaluation, evaluate, metric_evaluation,
+                evaluation_dataset)
+dashboard/      Streamlit dashboard (app.py router, pages/0..5_*.py, components/)
+.streamlit/     dashboard theme (config.toml)
 config/         config.yaml, bytetrack.yaml
-data/           runtime database, QR images and videos (all gitignored)
+data/           runtime database, QR images and videos (gitignored), and the committed synthetic
+                dummy_evaluation_dataset.csv
 models/         YOLO weights (gitignored), README.md
-scripts/        Windows .bat files, init_db, generate_qr, validate_qr, generate_dummy_data
+scripts/        Windows .bat files, init_db, generate_qr, validate_qr, generate_dummy_data,
+                generate_evaluation_dataset
 tests/          pytest suite
 docs/           architecture, installation, user guide, limitations
 ```

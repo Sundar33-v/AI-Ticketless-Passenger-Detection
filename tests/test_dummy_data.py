@@ -6,6 +6,7 @@ import re
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 import yaml
@@ -92,6 +93,35 @@ def test_run_for_another_day_reports_existing_day(demo_db, capsys):
     assert gen.main(["--db", str(demo_db), "--date", "2026-01-20", "--no-qr-images", "--reset", "--generate"]) == 0
     assert "Demo data for 2026-01-20 (and 2026-01-19) is in place." in capsys.readouterr().out
     assert as_tuple(metrics(demo_db, "custom", (date(2026, 1, 20), date(2026, 1, 20)))) == (7, 4, 16, 50, 2, 15, 16)
+
+
+def test_default_date_moves_old_demo_data_to_today(demo_db, capsys):
+    before = counts(demo_db)
+    capsys.readouterr()
+    assert gen.main(["--db", str(demo_db), "--no-qr-images"]) == 0
+    today = datetime.now(ZoneInfo(TZ)).date()
+    out = capsys.readouterr().out
+    assert f"Moved demo data from 2026-01-15 to {today:%Y-%m-%d}." in out
+    assert f"Demo data for {today:%Y-%m-%d}" in out
+    assert counts(demo_db) == before
+    conn = Database(demo_db).read_connection()
+    try:
+        day = compute_metrics(conn, period_for("custom", TZ, datetime.now(timezone.utc), custom=(today, today)))
+    finally:
+        conn.close()
+    assert as_tuple(day) == (7, 4, 16, 50, 2, 15, 16)
+
+
+def test_default_date_move_keeps_real_rows(demo_db):
+    _add_real_rows(demo_db)
+    assert gen.main(["--db", str(demo_db), "--no-qr-images"]) == 0
+    conn = sqlite3.connect(str(demo_db))
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM tickets WHERE ticket_id = 'TKT-REAL01'").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM detection_sessions WHERE session_id = 'real-session'"
+                            ).fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_every_demo_row_is_synthetic(demo_db):
